@@ -1,0 +1,303 @@
+# Nebula v1.11.0 build inputs (pinned)
+
+Research resolution for issue [#6](https://github.com/kjeung/MeshLAN/issues/6), "Pin the Nebula v1.11.0 build inputs".
+
+Everything below was verified against primary sources on 2026-10-26 UTC: the GitHub Releases API for
+`slackhq/nebula`, the release's own checksum file, the upstream repository at tag `v1.11.0`, and by
+**downloading and executing the released binaries**. Every claim is tagged with how it was verified.
+
+**Verification legend**
+- **[API]** — read from `https://api.github.com/repos/slackhq/nebula/releases/tags/v1.11.0` via `gh api`.
+- **[ARTIFACT]** — the asset was downloaded and inspected/executed locally in this environment.
+- **[SOURCE]** — read from the upstream repo at tag `v1.11.0` on github.com.
+
+---
+
+## 1. Exact release asset filenames
+
+There is **one tarball per architecture**, and it contains **both binaries** `nebula` and `nebula-cert`.
+
+| Platform | Asset filename | Size (bytes) | Download URL |
+|---|---|---|---|
+| linux/amd64 | `nebula-linux-amd64.tar.gz` | 18565398 | https://github.com/slackhq/nebula/releases/download/v1.11.0/nebula-linux-amd64.tar.gz |
+| linux/arm64 | `nebula-linux-arm64.tar.gz` | 16885007 | https://github.com/slackhq/nebula/releases/download/v1.11.0/nebula-linux-arm64.tar.gz |
+
+Release: https://github.com/slackhq/nebula/releases/tag/v1.11.0 — tag `v1.11.0`, published
+2026-07-23T18:24:53Z, `draft: false`, `prerelease: false`. **[API]**
+
+Both binaries are in the same tarball, at the **archive root with no leading directory** **[ARTIFACT]**:
+
+```
+$ tar -tzvf nebula-linux-amd64.tar.gz
+-rwxr-xr-x runner/runner 26262262 2026-07-23 18:16 nebula
+-rwxr-xr-x runner/runner 10337064 2026-07-23 18:16 nebula-cert
+
+$ tar -tzvf nebula-linux-arm64.tar.gz
+-rwxr-xr-x runner/runner 24393526 2026-07-23 18:18 nebula
+-rwxr-xr-x runner/runner  9749355 2026-07-23 18:18 nebula-cert
+```
+
+This is a flat archive, so `tar -xzf ... -C /usr/local/bin nebula nebula-cert` extracts straight into
+place with no `--strip-components` needed.
+
+> Do **not** reach for `nebula-darwin.zip` / `nebula-windows-*` for a Debian image. The Linux family also
+> contains `linux-386`, `linux-arm-5/6/7`, `mips*`, `ppc64le`, `riscv64`, `loong64`; only
+> `linux-amd64` and `linux-arm64` are relevant here. **[API]**
+
+---
+
+## 2. Official SHA-256 checksums
+
+### The checksum file is named `SHASUM256.txt` — not `SHA256SUMS`
+
+- **URL:** https://github.com/slackhq/nebula/releases/download/v1.11.0/SHASUM256.txt
+- Size 6852 bytes; its own SHA-256 is
+  `08cf9bf8b3cfe6da81ea6af137022f02371ba7de599661c9cd797d10e174bbc3` **[ARTIFACT, and matches the API
+  `digest` field]**.
+
+There is **no** asset named `SHA256SUMS`, `checksums.txt`, or similar in this release; `SHASUM256.txt` is
+the only checksum asset. **[API]** — full asset list inspected.
+
+### The values
+
+**Tarball (what the Dockerfile downloads):**
+
+```
+e7cdb240597d0783c9943e9c89aad3c96c59b67e75c644d62f33ae558e69d09e  nebula-linux-amd64.tar.gz
+da314d9791185583dddceb14dffe991caa6997eaff8dbe0445331a2fa70c6fd9  nebula-linux-arm64.tar.gz
+```
+
+**Individual binaries inside those tarballs (also listed in `SHASUM256.txt`):**
+
+```
+8c663f707027a24d6ae1b74b8bcd49cfea1f0e468aff91c864ef9723688734ab  nebula-linux-amd64.tar.gz/nebula
+769562eac7981de44cec48f4810499c6fa4ee250d05ed76a0f75c0f58f9275e9  nebula-linux-amd64.tar.gz/nebula-cert
+636d8d720ee5e8975aaea2548739b8fdc11add73c95579b8582cbf672c93f1d9  nebula-linux-arm64.tar.gz/nebula
+d526e8de3c3fc1779e062cde813d91cadbecfc11e78f55bb4ad88b881b8cfd2e  nebula-linux-arm64.tar.gz/nebula-cert
+```
+
+### Independently corroborated three ways
+
+1. **The published `SHASUM256.txt`** (above). **[ARTIFACT]**
+2. **GitHub's own per-asset `digest` field** from the releases API — GitHub computes this server-side, so it
+   is independent of the uploaded file:
+   - `nebula-linux-amd64.tar.gz` → `sha256:e7cdb240597d0783c9943e9c89aad3c96c59b67e75c644d62f33ae558e69d09e`
+   - `nebula-linux-arm64.tar.gz` → `sha256:da314d9791185583dddceb14dffe991caa6997eaff8dbe0445331a2fa70c6fd9`
+     **[API]**
+3. **Recomputed locally** after downloading both tarballs, and `sha256sum -c` against the published file
+   passed for both: **[ARTIFACT]**
+
+   ```
+   $ sha256sum -c expected.txt
+   nebula-linux-amd64.tar.gz: OK
+   nebula-linux-arm64.tar.gz: OK
+   ```
+
+   The four per-binary hashes were likewise recomputed from the extracted files and all matched. **[ARTIFACT]**
+
+### ⚠️ Gotcha for the Dockerfile: `SHASUM256.txt` is not fully `sha256sum -c`-compatible
+
+The file mixes two formats. Entries like `nebula-linux-amd64.tar.gz/nebula` use a **slash-joined
+"<archive>/<member>" label**, which is *not* a real filename. Running `sha256sum -c SHASUM256.txt` across
+the whole file therefore fails on the per-member lines. Grep out the line you want, or use
+`grep '  nebula-linux-amd64\.tar\.gz$' SHASUM256.txt | sha256sum -c -`. **[ARTIFACT]**
+
+The file is generated by the upstream release workflow, which confirms it is first-party rather than a
+hand-made artifact: [`.github/workflows/release.yml` at v1.11.0](https://github.com/slackhq/nebula/blob/v1.11.0/.github/workflows/release.yml)
+step "Create sha256sum" does `sha256sum $v` for each archive plus
+`tar zxf $v --to-command='sh -c "sha256sum | sed s=-$='$v'/$TAR_FILENAME="'` for the members, then
+`| sort -k 2 >SHASUM256.txt`. **[SOURCE]**
+
+### Build-time recommendation
+
+Pin the **tarball** hash (that is what you actually download), and optionally verify a per-binary hash after
+extraction. Because the checksum is fetched at build time, a hard-coded `ARG` per arch plus a fail-closed
+comparison is the safest shape — e.g. select `SHA256` from `TARGETARCH` and
+`echo "$SHA256  $TARBALL" | sha256sum -c -`. Hard-coding the digests above (they are immutable release
+assets) means a compromised or swapped download fails the build rather than silently baking in. If you prefer
+to fetch `SHASUM256.txt` in the same `RUN` layer, still assert a known-good expected value from the
+Dockerfile rather than trusting whatever the network returned.
+
+---
+
+## 3. CLI surface — confirmed present in v1.11.0
+
+**All commands MeshLAN issues were executed successfully against the released v1.11.0 `linux-amd64`
+binary.** Both binaries report `Version: 1.11.0`. **[ARTIFACT]**
+
+### `nebula-cert` modes (from `nebula-cert -h`)
+
+```
+Modes:
+  ca <flags>: create a self signed certificate authority
+  keygen <flags>: create a public/private key pair. the public key can be passed to `nebula-cert sign`
+  sign <flags>: create and sign a certificate
+  print <flags>: prints details about a certificate
+  verify <flags>: verifies a certificate isn't expired and was signed by a trusted authority.
+```
+
+### The specific calls MeshLAN makes
+
+| MeshLAN call | Confirmed | Evidence |
+|---|---|---|
+| `nebula-cert ca -name ... -duration ... -out-key ... -out-crt ...` | ✅ | ran; produced 10-year CA, [`cmd/meshlan/server.go:345`](../../cmd/meshlan/server.go#L345) |
+| `nebula-cert sign -version 2 ... -in-pub ... -out-crt ...` | ✅ | ran; [`cmd/meshlan/server.go:1697`](../../cmd/meshlan/server.go#L1697) |
+| `nebula-cert sign -version 2 ... -out-key ... -out-crt ...` | ✅ | ran; [`cmd/meshlan/server.go:348`](../../cmd/meshlan/server.go#L348) |
+| `nebula-cert keygen -out-key ... -out-pub ...` | ✅ | ran; [`cmd/meshlan/node_agent.go:62`](../../cmd/meshlan/node_agent.go#L62) |
+| `nebula -config <file>` | ✅ | ran against generated `lighthouse.yml` |
+
+Flag-by-flag confirmation from the v1.11.0 help output **[ARTIFACT]**:
+
+- `ca`: `-name` (Required), `-duration` (default `8760h0m0s`), `-out-key` (default `ca.key`),
+  `-out-crt` (default `ca.crt`), `-networks`, `-groups`, `-curve`, `-encrypt`, `-version`
+  (default 2). **All flags MeshLAN passes exist.**
+- `keygen`: `-out-key` and `-out-pub` (both **Required**), `-curve`.
+- `sign`: `-version` (uint; *"The default is to match the version of the signing CA"* — MeshLAN's explicit
+  `-version 2` is valid), `-ca-key`, `-ca-crt`, `-name` (Required), `-networks` (Required),
+  `-groups`, `-duration`, `-in-pub` (*"Optional (if out-key not set): path to read a previously
+  generated public key"*), `-out-crt`, `-out-key`.
+
+**`-in-pub` is real and is the documented way to sign a pre-generated public key** — it is mutually
+exclusive with `-out-key`, which is exactly how MeshLAN uses it: reusable pubkey + `-in-pub` at
+`server.go:1697` and `multinode.go:187`, vs. `-out-key` for the initial lighthouse at `server.go:348`.
+
+End-to-end run with MeshLAN's exact arguments **[ARTIFACT]**:
+
+```console
+$ nebula-cert ca -name MeshLAN -duration 87600h -out-key ca.key -out-crt ca.crt
+$ nebula-cert keygen -out-key lighthouse.key -out-pub lighthouse.pub
+$ nebula-cert sign -version 2 -ca-key ca.key -ca-crt ca.crt -name lighthouse \
+    -networks 10.42.0.1/24 -groups lighthouse -duration 8760h \
+    -in-pub lighthouse.pub -out-crt lighthouse.crt
+```
+→ all exit 0; `nebula-cert print` shows `"version": 2`, `"isCa": true`, `"name": "MeshLAN"`,
+`"notAfter": "2036-10-23..."` (i.e. `87600h` ≈ 10 years honoured).
+
+### `nebula` flags
+
+```
+-config string   Path to either a file or directory to load configuration from
+-help            Print command line usage
+-test            Test the config and print the end result. Non zero exit indicates a faulty config
+-version         Print version
+```
+
+**There is no `-logger` flag in v1.11.0.** Passing it fails hard: **[ARTIFACT]**
+
+```
+$ nebula -logger foo -config x
+flag provided but not defined: -logger
+Usage of ./nebula:
+  -config string
+  ...
+```
+
+So do not add `-logger` to the container entrypoint. Logging is configured **in the YAML**
+(`logging.level`, `logging.format`) — consistent with the v1.11.0 breaking change moving logging to
+`slog` ("Logging has switched from logrus to Go's structured `slog`", in the
+[release notes](https://github.com/slackhq/nebula/releases/tag/v1.11.0)).
+
+### `nebula -config` runs in the foreground
+
+Verified: no self-daemonization, it stays in the foreground and honours `SIGTERM` cleanly. **[ARTIFACT]**
+
+```
+$ timeout 5 nebula -config lighthouse.yml ; echo "EXIT=$?"
+... msg="Nebula interface is active" interface=disabled networks=[10.42.0.1/24] build=1.11.0 udpAddr=0.0.0.0:4242
+... msg="Caught signal, shutting down" signal=terminated
+... msg=Goodbye
+EXIT=124          # 124 = still running when the timeout fired → it does not fork into the background
+```
+
+This is good news for the Dockerfile: the container can use Nebula as **PID 1 / the foreground process**
+with no supervisor, and `docker stop` (SIGTERM) shuts it down cleanly. Upstream's own image does exactly
+this — [`docker/Dockerfile` at v1.11.0](https://github.com/slackhq/nebula/blob/v1.11.0/docker/Dockerfile)
+is `ENTRYPOINT ["/nebula"]` with `CMD ["-config", "/config/config.yml"]`. **[SOURCE]**
+
+`nebula -test -config <file>` also works and is a cheap build-time smoke test (exit 0 on a valid config),
+useful in the Dockerfile to fail the build if the generated `lighthouse.yml` is malformed. **[ARTIFACT]**
+
+---
+
+## 4. Placement in the image and PATH
+
+### Recommendation: `/usr/local/bin`
+
+Both `/usr/local/bin` and `/usr/bin` are on the default Debian `PATH`, so **either works** for bare-name
+lookup. `/usr/local/bin` is the better choice because:
+
+- It is conventionally the admin/operator namespace, and it **precedes** `/usr/bin` in `PATH`, so the
+  baked-in v1.11.0 wins over any distro-installed `nebula`.
+- Debian *does* ship a `nebula` package ([`apt install nebula`](https://packages.debian.org/source/stable/nebula),
+  linked from the [upstream README](https://github.com/slackhq/nebula/blob/v1.11.0/README.md)) which installs
+  to `/usr/bin`. `/usr/local/bin` keeps them from colliding.
+
+### Proof the bare names resolve
+
+Debian's official image sets this default environment — read from the image config blob in the Docker
+registry (`library/debian:bookworm-slim`, config digest `sha256:8da84df25d28176be84164040cd45e128c6b4c6a80b7d7cbe17fe2b9f198efc2`,
+created 2026-10-20): **[verified from the registry API]**
+
+```
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+`/usr/local/bin` is the **second** entry, so `exec.Command("nebula", ...)` resolves with no
+`PATH` change and no `ENV` line in the Dockerfile.
+
+This matches how MeshLAN shells out: `-nebula` defaults to the literal bare string `"nebula"` and
+`-nebula-cert` to `"nebula-cert"` **[verified in this repo: [`cmd/meshlan/server.go:318-319`](../../cmd/meshlan/server.go#L318-L319),
+[`server.go:579`](../../cmd/meshlan/server.go#L579), [`node_agent.go:30-31`](../../cmd/meshlan/node_agent.go#L30-L31)]**, and `exec.Command(p.executable, "-config", p.configPath)`
+passes them straight to the OS. A bare name with no slash goes through `PATH` lookup, so
+`/usr/local/bin` is sufficient.
+
+> If you ever set an explicit `ENV PATH` in the Dockerfile, **keep `/usr/local/bin` in it** — clobbering
+> `PATH` is the one way to break the bare-name contract.
+
+### Static binaries — no shared libraries needed
+
+`nebula` and `nebula-cert` are **statically linked Go binaries**. Confirmed three ways. **[ARTIFACT]**
+
+1. `ldd` on both (amd64 and arm64): `not a dynamic executable`.
+2. ELF program-header inspection — **no `PT_INTERP` segment and no `PT_DYNAMIC` segment** on any of the
+   four binaries (`ET_EXEC`, `x86-64` / `aarch64` respectively). No interpreter means no dynamic loader
+   is invoked at all.
+3. No `libc.so` or `ld-linux` strings anywhere in either binary.
+
+Upstream enforces this at build time: the [`Makefile` at v1.11.0](https://github.com/slackhq/nebula/blob/v1.11.0/Makefile)
+sets `CGO_ENABLED = 0` and `export`s it (line 2-3), so the release binaries are pure-Go and
+`CGO_ENABLED=0` ⇒ static. The same Makefile packs both binaries with
+`tar -zcv -C build/$* -f $@ nebula nebula-cert` (line 200-201). **[SOURCE]**
+
+Practical consequence for the Debian base: **no runtime shared-library packages are required** — the
+binaries need nothing beyond the base image's own files. Because they have no `PT_INTERP`, they also run on
+`scratch`/`distroless/static` — which is exactly what upstream's own image uses
+(`FROM gcr.io/distroless/static:latest` [`docker/Dockerfile` at v1.11.0](https://github.com/slackhq/nebula/blob/v1.11.0/docker/Dockerfile)). **[SOURCE]**
+
+*(Whether you additionally need `ca-certificates` is a **MeshLAN** question, not a Nebula one — Nebula's own
+PKI is its curve25519 certificate chain, not the OS trust store, but this research did not audit MeshLAN's
+TLS/admin listener dependencies. Not verified here.)*
+
+---
+
+## Summary for the Dockerfile author
+
+| Question | Answer |
+|---|---|
+| amd64 asset | `nebula-linux-amd64.tar.gz` — sha256 `e7cdb240597d0783c9943e9c89aad3c96c59b67e75c644d62f33ae558e69d09e` |
+| arm64 asset | `nebula-linux-arm64.tar.gz` — sha256 `da314d9791185583dddceb14dffe991caa6997eaff8dbe0445331a2fa70c6fd9` |
+| Both binaries in one tarball? | **Yes** — `nebula` + `nebula-cert`, flat at archive root |
+| Checksum file | `SHASUM256.txt` (not `SHA256SUMS`); contains both archive and per-member hashes |
+| CLI surface | **Fully confirmed** — every MeshLAN subcommand/flag executed successfully on v1.11.0 |
+| `-logger` flag | **Does not exist**; configure logging in YAML |
+| Placement | `/usr/local/bin` (on Debian's default `PATH`, before `/usr/bin`) |
+| Shared libs | **None** — statically linked, `CGO_ENABLED=0`, no `PT_INTERP` |
+| Foreground? | Yes — safe as PID 1, clean SIGTERM shutdown |
+
+### One thing this research did *not* verify
+
+Runtime behaviour requiring a TUN device (`/dev/net/tun` plus `CAP_NET_ADMIN`) was **not** tested here —
+all `nebula` runs above used `tun.disabled: true` or failed before device creation, because this
+environment has no `/dev/net/tun` and no Docker daemon. That is a **runtime** concern for
+`docker run`/`compose` (`--cap-add=NET_ADMIN`, `--device /dev/net/tun`), not a build-time one, and does
+not affect any pinned input above. Flagging it so nobody assumes it was covered.
