@@ -87,7 +87,8 @@ RUN set -eux; \
     command -v setcap; \
     /usr/local/bin/nebula -version; \
     /usr/local/bin/nebula-cert -version; \
-    /usr/local/bin/meshlan 2>&1 | grep -q '用法'
+    usage="$(/usr/local/bin/meshlan 2>&1 || true)"; \
+    case "$usage" in *用法*) : ;; *) echo "meshlan 无法执行或没有打印用法" >&2; exit 1 ;; esac
 
 # 构建期断言：最终层不含任何私钥、证书、状态文件与数据库（#7 的密钥边界）。
 # 只放行基础镜像自带的系统 CA 库。
