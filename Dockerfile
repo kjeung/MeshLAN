@@ -82,7 +82,8 @@ RUN set -eux; \
     mkdir -p /var/lib/meshlan/node; \
     chown 10001:10001 /var/lib/meshlan /var/lib/meshlan/node; \
     chmod 0700 /var/lib/meshlan /var/lib/meshlan/node; \
-    setcap cap_net_admin+ep /usr/local/bin/nebula /usr/local/bin/meshlan; \
+    setcap cap_net_admin+ep /usr/local/bin/nebula; \
+    setcap cap_net_admin+ep /usr/local/bin/meshlan; \
     command -v setpriv; \
     command -v setcap; \
     /usr/local/bin/nebula -version; \

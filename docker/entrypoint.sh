@@ -112,8 +112,12 @@ prepare_runtime() {
     chmod 0700 "$STATE_DIR"
     if command -v setcap >/dev/null 2>&1; then
       # 非 root 的 Nebula 需要“bounding set 里有 NET_ADMIN”+“二进制 file capability”两样齐备。
-      setcap cap_net_admin+ep "$NEBULA_BIN" "$MESHLAN_BIN" \
-        || die "给 $NEBULA_BIN / $MESHLAN_BIN 设置 cap_net_admin 失败：需要 CAP_SETFCAP（默认具备）与可写的 /usr/local/bin；若用了只读 rootfs，请在镜像构建期就设好 capability 并保留它"
+      # 必须逐个文件调用：libcap 2.75 在第二个文件上会以 EINVAL 失败（内核 6.1 实测），
+      # 而 setcap 的多文件形式不是原子操作——第一个文件会成功、第二个失败，退出码非零。
+      setcap cap_net_admin+ep "$NEBULA_BIN" \
+        || die "给 $NEBULA_BIN 设置 cap_net_admin 失败：需要 CAP_SETFCAP（默认具备）与可写的 /usr/local/bin；若用了只读 rootfs，请在镜像构建期就设好 capability 并保留它"
+      setcap cap_net_admin+ep "$MESHLAN_BIN" \
+        || die "给 $MESHLAN_BIN 设置 cap_net_admin 失败：需要 CAP_SETFCAP（默认具备）与可写的 /usr/local/bin；若用了只读 rootfs，请在镜像构建期就设好 capability 并保留它"
     else
       die "镜像里没有 setcap（libcap2-bin），无法给 Nebula 二进制设置 file capability"
     fi
