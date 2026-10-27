@@ -242,6 +242,8 @@ Replace the example addresses, ports, and paths:
 ```bash
 sudo install -d -m 0700 /etc/meshlan-nebula
 sudo install -m 0755 meshlan-nebula-server-linux-arm64 /usr/local/bin/meshlan-nebula
+sudo install -d -m 0755 /dev/net
+sudo mknod /dev/net/tun c 10 200 2>/dev/null || true
 
 sudo /usr/local/bin/meshlan-nebula server init \
   -state /etc/meshlan-nebula/server-state.json \
@@ -255,7 +257,10 @@ sudo /usr/local/bin/meshlan-nebula server init \
 
 The init command displays the pairing hash and admin token once. Save them in a password manager,
 then run `server serve` under systemd. Allow the configured Nebula UDP port and pairing/admin HTTPS
-port through the firewall. Production deployments should use a valid domain certificate, a dedicated
+port through the firewall. Nebula also needs a tun device: run `server serve` as root (or with
+`CAP_NET_ADMIN`) on a host that has `/dev/net/tun`, otherwise it exits when Nebula fails to start. The
+tun device name is fixed at `meshlan-lh` (15 bytes, the kernel `IFNAMSIZ-1` limit). Production
+deployments should use a valid domain certificate, a dedicated
 systemd user, `LoadCredential`, minimal firewall rules, and offline backups.
 
 ### Run the Windows client

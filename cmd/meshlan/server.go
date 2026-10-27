@@ -409,7 +409,7 @@ relay:
 
 tun:
   disabled: false
-  dev: MeshLAN-Lighthouse
+  dev: %s
   mtu: 1300
   network_category: private
 
@@ -426,7 +426,7 @@ firewall:
 logging:
   level: info
   format: text
-`, yamlPath(ca), yamlPath(cert), yamlPath(key), renderBlocklistYAML(revokedFingerprints), port)
+`, yamlPath(ca), yamlPath(cert), yamlPath(key), renderBlocklistYAML(revokedFingerprints), port, tunDeviceName(lighthouseTunDeviceName))
 }
 
 type rateLimiter struct {

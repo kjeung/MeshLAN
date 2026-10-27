@@ -106,7 +106,7 @@ relay:
 
 tun:
   disabled: false
-  dev: MeshLAN-Node
+  dev: %s
   mtu: 1300
 
 firewall:
@@ -122,7 +122,7 @@ firewall:
 logging:
   level: info
   format: text
-`, yamlPath(state.CACertificatePath), yamlPath(state.CertificatePath), yamlPath(state.PrivateKeyPath), renderBlocklistYAML(state.RevokedFingerprints), state.NebulaPort)
+`, yamlPath(state.CACertificatePath), yamlPath(state.CertificatePath), yamlPath(state.PrivateKeyPath), renderBlocklistYAML(state.RevokedFingerprints), state.NebulaPort, tunDeviceName("MeshLAN-Node"))
 }
 
 func serverNodeServe(args []string) error {

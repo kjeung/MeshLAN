@@ -246,6 +246,8 @@ SHA256SUMS.txt
 ```bash
 sudo install -d -m 0700 /etc/meshlan-nebula
 sudo install -m 0755 meshlan-nebula-server-linux-arm64 /usr/local/bin/meshlan-nebula
+sudo install -d -m 0755 /dev/net
+sudo mknod /dev/net/tun c 10 200 2>/dev/null || true
 
 sudo /usr/local/bin/meshlan-nebula server init \
   -state /etc/meshlan-nebula/server-state.json \
@@ -261,7 +263,9 @@ sudo /usr/local/bin/meshlan-nebula server init \
 ツールに保存した後、systemd で `server serve` を実行してください。設定した Nebula UDP
 ポートとペアリング／管理 HTTPS ポートをファイアウォールで許可します。本番環境では
 有効なドメイン証明書、専用 systemd ユーザー、`LoadCredential`、最小限の許可ルール、
-オフラインバックアップを推奨します。
+オフラインバックアップを推奨します。Nebula は tun デバイスを作成するため、`/dev/net/tun` がある
+ホストで `server serve` を root（または `CAP_NET_ADMIN` 付き）で実行してください。tun デバイス名は
+`meshlan-lh`（15 バイト、カーネルの `IFNAMSIZ-1` 上限）に固定されています。
 
 ### Windows クライアントを実行
 

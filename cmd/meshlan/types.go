@@ -1149,6 +1149,31 @@ func allocateAddress(state ServerState) (string, error) {
 
 func yamlPath(path string) string { return filepath.ToSlash(path) }
 
+// maxTunDeviceNameLength is the longest interface name the Linux kernel accepts:
+// IFNAMSIZ (16, include/uapi/linux/if.h) minus the terminating NUL. nebula copies
+// tun.dev into a 16-byte ifreq.ifr_name before TUNSETIFF without NUL-terminating it,
+// and the kernel rejects a full 16-byte name both in dev_valid_name
+// (strnlen(name, IFNAMSIZ) == IFNAMSIZ) and in alloc_netdev_mqs
+// (BUG_ON(strlen(name) >= sizeof(dev->name))).
+const maxTunDeviceNameLength = 15
+
+// lighthouseTunDeviceName is the Lighthouse's tun interface name. The pre-fix name
+// MeshLAN-Lighthouse was 18 bytes and made `server serve` fail on Linux at TUNSETIFF;
+// this one is 10. `server serve` rewrites lighthouse.yml on every start, so an existing
+// state root picks the new name up on restart with no migration step.
+const lighthouseTunDeviceName = "meshlan-lh"
+
+// tunDeviceName is the tun interface name rendered into a nebula config. Names
+// already within the kernel limit are returned unchanged; longer ones are
+// byte-clamped, which is exactly how the kernel counts. nebula -test cannot catch an
+// over-long name (it skips tun creation), so every renderer must go through here.
+func tunDeviceName(name string) string {
+	if len(name) <= maxTunDeviceNameLength {
+		return name
+	}
+	return name[:maxTunDeviceNameLength]
+}
+
 func clientListenPort(state ClientState) int {
 	if state.NebulaListenPort >= clientListenPortBase && state.NebulaListenPort <= clientListenPortMaximum {
 		return state.NebulaListenPort
@@ -1235,7 +1260,7 @@ relay:
 
 tun:
   disabled: false
-  dev: MeshLAN
+  dev: %s
   mtu: 1300
   network_category: private
 
@@ -1252,7 +1277,7 @@ firewall:
 logging:
   level: info
   format: text
-`, yamlPath(state.CACertificatePath), yamlPath(state.CertificatePath), yamlPath(state.PrivateKeyPath), renderBlocklistYAML(state.RevokedFingerprints), strings.TrimRight(staticMaps.String(), "\n"), strings.TrimRight(lighthouseHosts.String(), "\n"), lighthousePolicy, listenHost, clientListenPort(state), strings.TrimRight(relayHosts.String(), "\n"), !state.ForceP2P), nil
+`, yamlPath(state.CACertificatePath), yamlPath(state.CertificatePath), yamlPath(state.PrivateKeyPath), renderBlocklistYAML(state.RevokedFingerprints), strings.TrimRight(staticMaps.String(), "\n"), strings.TrimRight(lighthouseHosts.String(), "\n"), lighthousePolicy, listenHost, clientListenPort(state), strings.TrimRight(relayHosts.String(), "\n"), !state.ForceP2P, tunDeviceName("MeshLAN")), nil
 }
 
 func effectiveLighthouseEndpoints(pairing *PairResponse) []LighthouseEndpoint {

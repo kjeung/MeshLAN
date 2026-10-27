@@ -254,6 +254,8 @@ go vet ./...
 ```bash
 sudo install -d -m 0700 /etc/meshlan-nebula
 sudo install -m 0755 meshlan-nebula-server-linux-arm64 /usr/local/bin/meshlan-nebula
+sudo install -d -m 0755 /dev/net
+sudo mknod /dev/net/tun c 10 200 2>/dev/null || true
 
 sudo /usr/local/bin/meshlan-nebula server init \
   -state /etc/meshlan-nebula/server-state.json \
@@ -277,6 +279,10 @@ sudo /usr/local/bin/meshlan-nebula server serve \
 
 - Nebula UDP 端口（示例 `4242/udp`）；
 - 配对/管理 HTTPS 端口（示例 `8443/tcp`）。
+
+运行期还要求：Nebula 要建 tun 设备，所以 `server serve` 必须以 root（或带
+`CAP_NET_ADMIN`）运行，宿主机要有 `/dev/net/tun`；否则它在启动 Nebula 时
+失败并直接退出。tun 设备名固定为 `meshlan-lh`（15 字节，正好是内核 `IFNAMSIZ-1` 上限）。
 
 生产环境应使用反向代理、有效域名证书、最小化防火墙、专用 systemd 用户、
 `LoadCredential` 和离线备份。示例 credential drop-in 位于
