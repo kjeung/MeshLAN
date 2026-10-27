@@ -52,10 +52,18 @@ Consequences: **do not** assert `143`, and **do not** assert `137` either. If a 
 namespace-init semantics could not be exercised in the build sandbox (no `/dev/fuse`,
 `unshare -Ur` refused), so this rests on kernel source, not experiment.
 
-## Unverified fallback: root → chown → setpriv
+## Fallback is now the fixed path: root → chown → setpriv
 
-If acceptance shows the named volume's copy-up layer is not owned by 10001, the entrypoint
-falls back to `root → chown the state root → setpriv → exec the server`. The "no signal
-proxy, service is PID 1" decision still stands, because the exec'd process is still the
-server; only the privilege drop moves earlier. This path is untested — enable it only if
-acceptance proves it is needed.
+**Measured 2026-10-27 on a real Docker host** (Debian 12, Docker 29.8.1): a freshly created
+named volume mounts with owner `0:0` and 0755, and uid 10001 cannot write into it
+(`Permission denied`). After `chown 10001:10001` and `chmod 700`, uid 10001 writes and
+creates subdirectories normally. So the entrypoint **always** runs
+
+`root → chown the state root → setpriv → exec the server`,
+
+not just when acceptance proves it is needed. The "no signal proxy, service is PID 1"
+decision still stands, because the exec'd process is still the server; only the privilege
+drop moves earlier. The same probe confirmed the TUN side: nebula needs an explicit
+`/dev/net/tun` device node (self-creating it requires `CAP_MKNOD`, which the minimal capability
+set lacks), and a non-root run needs `NET_ADMIN` in the bounding set **plus** a file capability
+on the binary — either one alone fails. See the owning spec for the full capability matrix.
