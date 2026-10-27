@@ -41,7 +41,7 @@ RUN set -eu; \
     mkdir -p /out; \
     curl -fsSL -o /tmp/nebula.tar.gz \
       "https://github.com/slackhq/nebula/releases/download/${NEBULA_VERSION}/nebula-linux-${TARGETARCH}.tar.gz"; \
-    printf '%s  %s\\n' "${checksum}" /tmp/nebula.tar.gz | sha256sum -c -; \
+    printf '%s  %s\n' "${checksum}" /tmp/nebula.tar.gz | sha256sum -c -; \
     tar -xzf /tmp/nebula.tar.gz -C /out nebula nebula-cert; \
     chmod 0755 /out/nebula /out/nebula-cert; \
     /out/nebula -version; \
