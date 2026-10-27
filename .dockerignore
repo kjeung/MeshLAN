@@ -1,0 +1,61 @@
+# 构建上下文排除清单。以仓库 .gitignore 为底本，补齐它漏掉的派生状态文件与
+# 只服务于 Windows 客户端的资源（issue #7 的密钥边界、白名单式拷贝）。
+# 构建阶段只拷贝 go.mod / go.sum / cmd/。
+
+# 版本控制与协作文档
+.git
+.github
+.gitattributes
+AGENTS.md
+CLAUDE.md
+
+# 构建产物与缓存
+dist
+output
+work
+.cache
+.gocache
+.gomodcache
+.tmp-go-cache
+.playwright-cli
+*.test
+*.prof
+coverage.out
+docker-compose.yml
+.dockerignore
+
+# 运行时状态与数据库
+*state*.json
+*state*.json.*
+*.pre-upgrade
+*.pre-master-rotation
+*.master.key.previous
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.log
+backups/
+
+# 密钥与 PKI 材料（含派生副本）
+.env
+.env.*
+!.env.example
+*.key
+*.key.*
+*.pem
+*.p12
+*.pfx
+*.crt
+credentials/
+
+# 文档与截图（构建不需要）
+docs
+
+# 只服务于 Windows 客户端的资源与工具脚本
+cmd/meshlan/web
+cmd/meshlan/assets
+cmd/meshlan/rsrc_windows_amd64.syso
+tools
+build.ps1
+install-local.ps1

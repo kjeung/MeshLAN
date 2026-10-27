@@ -284,6 +284,105 @@ sudo -E bash /tmp/install-mesh-node.sh --endpoint 198.51.100.20 --name edge-01
 The script prints an `MLNODE1...` enrollment hash. Add the node address and hash in the main
 server's multi-node page.
 
+## Running it in a container (Docker / Podman)
+
+> The image is built locally and **never pushed to any registry**. Definitions: `Dockerfile`,
+> `docker-compose.yml`, `.dockerignore`, `docker/entrypoint.sh`.
+
+One image, one role per container (`MESHLAN_ROLE=lighthouse|node`). **Relay is a capability of a
+Lighthouse, not a third role**, so there is no "relay service" in the compose file.
+
+```bash
+# The public endpoint is required. Lighthouse wants "host:port"; Node wants a bare host.
+MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d --build
+```
+
+The first start signs the CA and both identities, then starts Nebula. All state lands on the named
+volume `meshlan-state` at `/var/lib/meshlan` (Node uses `/var/lib/meshlan/node` inside the same
+volume).
+
+**The volume is the identity and the master key. Deleting it rebuilds the whole PKI and every paired
+device is lost for good.** Upgrading is just `docker compose up -d --build`; recreating the container
+keeps the CA fingerprint, the pairing codes and the history database.
+
+**First start**
+
+- With no `MESHLAN_PUBLIC_ENDPOINT` the container exits non-zero immediately and prints one copyable
+  command. It does **not** guess localhost and does **not** probe the egress address.
+- That address is written into the state at init time and there is no command to change it:
+  **get it wrong and the only way back is deleting the volume and rebuilding the PKI.**
+- Initialisation is idempotent on one criterion only: does this role's state file exist. If the state
+  file is missing while init material (`ca.key` and friends) is already there, the entrypoint refuses
+  with "the previous init did not finish" instead of silently re-running (`nebula-cert`'s `ca`/`sign`
+  refuse to overwrite).
+- Init only, no service: `MESHLAN_INIT_ONLY=1`.
+
+**One-time credentials**
+
+The pairing hash and admin token (Node gets an `MLNODE1…` hash) are printed once at init and also
+written to `first-credentials.txt` in the state root (`0600`, inside the volume, never auto-deleted):
+
+```bash
+docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
+```
+
+**Do not pipe the init phase's stdout into a persistent log sink**: `server init` writes a plaintext
+`ca.key` before encrypting it, so that short window can leak a private key. The compose file rotates its
+logs, which lowers the exposure but does not replace this rule.
+
+To regenerate (the old value dies immediately; already-paired devices are unaffected):
+
+```bash
+docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
+docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/server-state.json
+```
+
+**Ports, capabilities, health**
+
+| Role | Ports (host:container, 1:1) | Health check |
+| --- | --- | --- |
+| Lighthouse | `8090/tcp`, `4242/udp` | `GET /v1/admin/auth-info`, 200 with a JSON `Content-Type` |
+| Node | `18090/tcp`, `14242/udp` | `GET /v1/node/health`, 200 with parseable JSON |
+
+**Ports are always 1:1; never translate them.** The Nebula endpoint a Node advertises and the control
+port in its pairing payload are used verbatim by the Lighthouse, so a translated mapping points devices
+at the wrong port.
+
+No root, no `privileged`, no kernel modules — but Nebula needs two things: the `/dev/net/tun` device node
+and the `NET_ADMIN` capability. A non-root process also needs a file capability on the binary, so the
+entrypoint `setcap`s it and `setpriv`s down to uid/gid 10001 (a freshly created named volume mounts owned
+by root, so the entrypoint chowns the state root first).
+
+**The blind spot of the health check**: `healthy` means the control plane is listening. It does not mean
+Nebula is up, and it does not mean pairing works. The probe uses unauthenticated endpoints, accepts the
+self-signed certificate (`curl -k`) and does not verify the certificate chain.
+
+**Stop, backup, upgrade**
+
+- `stop_grace_period: 30s`. **Do not assert exit codes**: the container init is protected by the kernel's
+  `SIGNAL_UNKILLABLE`, so SIGTERM never reaches the server and 143/137 are not criteria; a 137 means the
+  grace period was too short. See `docs/adr/0001-no-graceful-shutdown-in-container.md`.
+- Backups are **cold**: stop the container, copy the whole state directory, and include SQLite's WAL side
+  files.
+- External master key (optional, advanced): point `MESHLAN_MASTER_KEY_FILE` at a platform secret and
+  **every subcommand must then also pass `-state` explicitly**, or it will look at the wrong default path
+  and miss the key. Subcommands inside the container:
+
+```bash
+docker compose exec lighthouse meshlan server list -state /var/lib/meshlan/server-state.json
+```
+
+**Node role**
+
+```bash
+MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.100.20 \
+  docker compose --profile node up -d
+```
+
+The profile name is `node` (never `relay`). A Node shares the state volume with the Lighthouse but keeps
+its identity in a subdirectory; take the `MLNODE1…` hash from `first-credentials.txt` and add the node on
+the Lighthouse's multi-node admin page.
+
 ## AI assistant
 
 AI is optional. Administrators can configure any OpenAI-compatible HTTPS endpoint and model. The

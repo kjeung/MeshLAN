@@ -1,0 +1,86 @@
+# MeshLAN Linux 控制面的 compose 定义（契约见 issue #8）。
+#
+#   docker compose up -d               # 拉起一台默认 Lighthouse
+#   MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d
+#   docker compose --profile node up -d  # 再拉起一台 Node（同主机时端口错开）
+#
+# 端口一律宿主 1:1，禁止端口翻译：Node 对外宣称的 Nebula 端点与配对载荷里的控制端口
+# 都会被主控原样取用，翻译映射会让主控连到错误端口。
+# Relay 是 Lighthouse 的能力，不是角色，因此这里没有“relay 服务”。
+
+name: meshlan
+
+x-meshlan-common: &meshlan-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: meshlan:local
+  restart: unless-stopped
+  # 容器 init 的信号语义：SIGTERM 到不了服务进程，必须给足宽限期（ADR-0001）。
+  stop_grace_period: 30s
+  # 非 root 的 Nebula 需要 bounding set 里有 NET_ADMIN + 二进制 file capability（入口负责后者）。
+  cap_add:
+    - NET_ADMIN
+  # 「只给 NET_ADMIN、让 nebula 自建 tun」不成立：自建需要 CAP_MKNOD，最小能力集里没有。
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  logging:
+    driver: json-file
+    options:
+      # 入口在初始化阶段会打印一次性凭据（随后落 0600 文件）。日志轮转 + 文档里的口径
+      # 共同把暴露面压到最小；不要把 init 阶段 stdout 接进持久日志系统。
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  lighthouse:
+    <<: *meshlan-common
+    container_name: meshlan-lighthouse
+    environment:
+      MESHLAN_ROLE: lighthouse
+      # 必填、无缺省：写进状态后就改不动了（仓库里没有修改命令）。
+      MESHLAN_PUBLIC_ENDPOINT: ${MESHLAN_PUBLIC_ENDPOINT:-}
+      MESHLAN_SUBNET: ${MESHLAN_SUBNET:-10.77.0.0/24}
+      MESHLAN_NEBULA_PORT: ${MESHLAN_NEBULA_PORT:-4242}
+      MESHLAN_PAIRING_PORT: ${MESHLAN_PAIRING_PORT:-8090}
+    ports:
+      - "8090:8090/tcp"
+      - "4242:4242/udp"
+    volumes:
+      - meshlan-state:/var/lib/meshlan
+    healthcheck:
+      # 免认证端点：同时走过 TLS 握手与 HTTP 路由；只认 Content-Type 为 JSON，
+      # 否则 :8090 上任何返回 200 文本的路径都会假绿。自签证书只能 -k。
+      test: ["CMD-SHELL", "curl -kfsS -o /dev/null -w '%{content_type}' https://127.0.0.1:8090/v1/admin/auth-info | grep -qi 'application/json'"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      # 冷启动要先签发 PKI、打开历史库、拉起 Nebula，最后才监听 TLS。
+      start_period: 30s
+
+  node:
+    <<: *meshlan-common
+    container_name: meshlan-node
+    profiles: ["node"]
+    environment:
+      MESHLAN_ROLE: node
+      # Node 要纯主机（不带端口）：node-init 自己拼外部端点与控制端点。
+      MESHLAN_PUBLIC_ENDPOINT: ${MESHLAN_NODE_PUBLIC_ENDPOINT:-}
+      MESHLAN_NEBULA_PORT: ${MESHLAN_NODE_NEBULA_PORT:-14242}
+      MESHLAN_PAIRING_PORT: ${MESHLAN_NODE_PAIRING_PORT:-18090}
+    ports:
+      - "18090:18090/tcp"
+      - "14242:14242/udp"
+    volumes:
+      - meshlan-state:/var/lib/meshlan
+    healthcheck:
+      # 未配对时 Nebula 本就不启动，所以这里只要求它返回 JSON。
+      test: ["CMD-SHELL", "curl -kfsS -o /dev/null -w '%{content_type}' https://127.0.0.1:18090/v1/node/health | grep -qi 'application/json'"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  # 卷 = 身份 + 主密钥；删卷 = 重建整个 PKI，已配对设备永久失联。
+  meshlan-state:

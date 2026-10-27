@@ -288,6 +288,101 @@ sudo -E bash /tmp/install-mesh-node.sh --endpoint 198.51.100.20 --name edge-01
 スクリプトが表示する `MLNODE1...` 登録ハッシュとノードアドレスを、メインサーバーの
 マルチノード画面に入力します。
 
+## コンテナでの運用（Docker / Podman）
+
+> イメージはローカルでビルドし、**どのレジストリにも公開しません**。定義ファイル：
+> `Dockerfile`、`docker-compose.yml`、`.dockerignore`、`docker/entrypoint.sh`。
+
+1 つのイメージ、1 コンテナ 1 ロール（`MESHLAN_ROLE=lighthouse|node`）。**Relay は Lighthouse が持つ
+能力であり、3 つ目のロールではありません**。したがって compose に「relay サービス」はありません。
+
+```bash
+# 公衆アドレスは必須。Lighthouse は「ホスト:ポート」、Node はポートなしのホスト。
+MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d --build
+```
+
+初回起動で CA と 2 つの ID を発行し、その後 Nebula を起動します。状態はすべて名前付きボリューム
+`meshlan-state` の `/var/lib/meshlan` に置かれます（Node は同じボリューム内の
+`/var/lib/meshlan/node`）。
+
+**ボリューム = アイデンティティ + マスターキー。削除すると PKI の再構築となり、ペアリング済みの
+端末はすべて永久に失われます。** 更新は `docker compose up -d --build` だけです。コンテナを作り直して
+も CA フィンガープリント、ペアリングコード、履歴データベースは変わりません。
+
+**初回起動**
+
+- `MESHLAN_PUBLIC_ENDPOINT` が無いとコンテナは直ちに非ゼロで終了し、コピーできるコマンドを 1 行
+  出力します。localhost を推測せず、外向きアドレスの自動検出もしません。
+- このアドレスは初期化時に状態へ書き込まれ、変更用のコマンドはありません。
+  **間違えた場合の唯一の復旧手段はボリューム削除と PKI の再構築です。**
+- 冪等性の判定は「このロールの状態ファイルが存在するか」だけです。状態ファイルが無いのに
+  `ca.key` などの材料が残っている場合は「前回の初期化が未完了」として停止し、黙って再実行は
+  しません（`nebula-cert` の `ca`/`sign` は上書きを拒否します）。
+- 初期化のみでサービスを起動しない：`MESHLAN_INIT_ONLY=1`。
+
+**一度きりの資格情報**
+
+ペアリングハッシュと管理者トークン（Node は `MLNODE1…`）は初期化時に一度だけ表示され、同時に
+状態ルートの `first-credentials.txt`（`0600`、ボリューム内、自動削除なし）へ保存されます：
+
+```bash
+docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
+```
+
+**初期化フェーズの stdout を永続ログへ流さないでください**：`server init` は暗号化する前に平文の
+`ca.key` を書き出すため、その短い区間に秘密鍵が混ざり得ます。compose はログをローテーションしますが、
+これは露出を減らすだけで、この原則の代わりにはなりません。
+
+再生成する場合（古い値は即時失効、ペアリング済み端末は影響なし）：
+
+```bash
+docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
+docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/server-state.json
+```
+
+**ポート・権限・ヘルスチェック**
+
+| ロール | ポート（ホスト:コンテナ、1:1） | ヘルスチェック |
+| --- | --- | --- |
+| Lighthouse | `8090/tcp`、`4242/udp` | `GET /v1/admin/auth-info`、200 かつ JSON の `Content-Type` |
+| Node | `18090/tcp`、`14242/udp` | `GET /v1/node/health`、200 かつ解析可能な JSON |
+
+**ポートは常に 1:1 で、変換マッピングは禁止です。** Node が広告する Nebula エンドポイントと
+ペアリング情報の制御ポートは Lighthouse にそのまま使われるため、変換すると端末が誤ったポートへ
+接続します。
+
+root も `privileged` もカーネルモジュールも不要ですが、Nebula には `/dev/net/tun` と `NET_ADMIN`
+が必要です。非 root ではバイナリの file capability も必要なので、エントリポイントが `setcap` し、
+uid/gid 10001 へ `setpriv` で降格します（新規の名前付きボリュームは root 所有でマウントされるため、
+先に状態ルートを `chown` します）。
+
+**ヘルスチェックの盲点**：`healthy` はコントロールプレーンが待ち受けていることだけを意味します。
+Nebula が通っていることも、ペアリングできることも意味しません。プローブは認証不要の端点を使い、
+自己署名証明書を許可し（`curl -k`）、証明書チェーンは検証しません。
+
+**停止・バックアップ・更新**
+
+- `stop_grace_period: 30s`。**終了コードを判定しないでください**：コンテナ init はカーネルの
+  `SIGNAL_UNKILLABLE` で保護され、SIGTERM はサーバーに届かないため 143/137 は判定基準になりません。
+  137 は「猶予が短すぎた」と読みます。根拠は
+  `docs/adr/0001-no-graceful-shutdown-in-container.md`。
+- バックアップは**コールド**：コンテナを停止して状態ディレクトリごとコピーし、SQLite の WAL 副ファイル
+  も含めます。
+- 外部マスターキー（任意・上級）：`MESHLAN_MASTER_KEY_FILE` をプラットフォームの secret に向けると、
+  **すべてのサブコマンドで `-state` を明示**する必要があります。そうしないと既定パスを見に行き、
+  キーを読めません。
+
+**Node ロール**
+
+```bash
+MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.100.20 \
+  docker compose --profile node up -d
+```
+
+プロファイル名は `node` 固定です（`relay` にはしません）。Node は Lighthouse と同じ状態ボリュームを
+共有しますが、ID はサブディレクトリに置きます。`first-credentials.txt` の `MLNODE1…` ハッシュを
+Lighthouse のマルチノード管理画面で追加してください。
+
 ## AI アシスタント
 
 AI は任意機能です。管理者は OpenAI 互換 HTTPS エンドポイントとモデルを設定できます。

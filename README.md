@@ -326,6 +326,105 @@ curl -fsSL "$MESHLAN_RELEASE_BASE_URL/download/node/upgrade.sh" | sudo -E bash
 
 升级脚本会校验 SHA-256、保留节点身份、重启健康检查，并在失败时回滚。
 
+## 容器部署（Docker / Podman）
+
+> 镜像在本地构建，**不向任何 registry 发布**。定义文件：`Dockerfile`、`docker-compose.yml`、
+> `.dockerignore`、`docker/entrypoint.sh`。
+
+一台镜像、一个容器一个角色（`lighthouse` / `node`）。**Relay 是 Lighthouse 的一种能力，不是第三个角色**，
+所以 compose 里没有"relay 服务"。
+
+```bash
+# 公网地址必填：Lighthouse 要“主机:端口”，Node 要纯主机（不带端口）
+MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d --build
+```
+
+首次启动会签发 CA、Lighthouse 证书与两套身份，随后拉起 Nebula。状态全部落在命名卷
+`meshlan-state` 的 `/var/lib/meshlan`（Node 用同一卷内的 `/var/lib/meshlan/node`）。
+
+**卷 = 身份 + 主密钥。删卷 = 重建整个 PKI，所有已配对设备永久失联。** 升级镜像只需
+`docker compose up -d --build`，重建容器不会改变 CA 指纹、配对码与历史库。
+
+### 首次启动
+
+- 缺少 `MESHLAN_PUBLIC_ENDPOINT` 时容器立刻以非零码退出并打印一行可复制的命令，**不会**猜
+  localhost、也不会探测出口地址。
+- 这个地址在初始化时被写进状态，仓库里没有修改命令：**填错了只能删卷重建 PKI**。
+- 初始化只认"本角色状态文件是否存在"作为幂等判据；状态文件不在但已有 `ca.key` 一类的材料时，
+  入口报"上次初始化未完成"并退出，不会静默重跑（`nebula-cert` 的 `ca`/`sign` 拒绝覆盖）。
+- 只初始化、不启动服务：`MESHLAN_INIT_ONLY=1`。
+
+### 一次性凭据
+
+配对哈希与管理令牌（Node 是 `MLNODE1…`）只在初始化时打印一次，同时落一份到状态根下的
+`first-credentials.txt`（`0600`，卷内，容器不会自动删除）：
+
+```bash
+docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
+```
+
+**初始化阶段的 stdout 不得接进持久日志系统**：`server init` 会先落明文 `ca.key`、随后才加密并删除，
+那一小段输出可能带出私钥。compose 已给日志加了轮转，但这只降低暴露面、不替代这条口径。
+
+需要重新生成时（旧值立即失效，已配对设备不受影响）：
+
+```bash
+docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
+docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/server-state.json
+```
+
+### 端口、能力与健康检查
+
+| 角色 | 端口（宿主:容器，1:1） | 健康检查 |
+| --- | --- | --- |
+| Lighthouse | `8090/tcp`、`4242/udp` | `GET /v1/admin/auth-info`，要求 200 且 `Content-Type` 为 JSON |
+| Node | `18090/tcp`、`14242/udp` | `GET /v1/node/health`，只要求 200 且 JSON 可解析 |
+
+**端口一律 1:1，禁止端口翻译**：Node 对外宣称的 Nebula 端点与配对载荷里的控制端口都会被主控原样取用，
+翻译映射会让主控连到错误的端口。
+
+不需要 root、不需要 `privileged`，也不加载任何内核模块，但 Nebula 要两样东西：`/dev/net/tun` 设备节点
+与 `NET_ADMIN` 能力。非 root 用户还需要二进制上的 file capability，入口会在启动前 `setcap` 并
+`setpriv` 降权到 uid/gid 10001（命名卷首次挂载的属主是 root，入口会先 `chown` 状态根）。
+
+**健康检查的盲区**：`healthy` 只说明控制面在监听，既不说明 Nebula 打通，也不说明能配对。探针走免认证
+端点并对自签证书放行（`curl -k`），不验证证书链。
+
+### 停止、备份与升级
+
+- `stop_grace_period: 30s`。**不要对退出码断言**：容器 init 受内核 `SIGNAL_UNKILLABLE` 保护，
+  SIGTERM 到不了服务进程，143/137 都不是判据；看到 137 应读作"宽限期不够"。理由见
+  `docs/adr/0001-no-graceful-shutdown-in-container.md`。
+- 备份是**冷备份**：停容器后整目录拷贝状态卷，必须连同 SQLite 的 WAL 附属文件一起。
+- 外部主密钥（可选进阶）：`MESHLAN_MASTER_KEY_FILE` 指向平台 secret 后，**每条子命令都必须同时
+  显式带 `-state`**，否则命令会找错默认路径、读不到主密钥。容器里的子命令用法：
+
+```bash
+docker compose exec lighthouse meshlan server list -state /var/lib/meshlan/server-state.json
+```
+
+### Node 角色
+
+```bash
+MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.100.20 \
+  docker compose --profile node up -d
+```
+
+Node 的 profile 名固定为 `node`。它和 Lighthouse 共用同一个状态卷，但身份存放在子目录里；把
+`first-credentials.txt` 里的 `MLNODE1…` 哈希填到 Lighthouse 管理台的多节点页面即可。
+
+### Container usage (English)
+
+One image, one role per container (`MESHLAN_ROLE=lighthouse|node`); Relay is a Lighthouse capability,
+not a role. The image is built locally and **never pushed to a registry**. The public endpoint is
+required at first start and cannot be changed afterwards without recreating the PKI. State lives on the
+named volume `meshlan-state` (`/var/lib/meshlan`, Node in `/var/lib/meshlan/node`); **deleting the
+volume rebuilds the whole PKI**. Ports are mapped 1:1 (Lighthouse `8090/tcp` + `4242/udp`, Node
+`18090/tcp` + `14242/udp`) because Node advertises exactly those ports. The container needs
+`/dev/net/tun` and `NET_ADMIN`; the entrypoint chowns the state root, sets the file capability, drops to
+uid 10001 and execs the server as PID 1 (no signal proxy, no exit-code assertions). A green health
+check means the control plane answers — not that Nebula is up, and not that pairing works.
+
 ## AI 助手
 
 AI 是可选功能。管理员可配置任意 OpenAI-compatible HTTPS 地址和模型。模型 API 密钥
