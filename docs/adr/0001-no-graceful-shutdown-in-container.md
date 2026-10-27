@@ -67,3 +67,37 @@ drop moves earlier. The same probe confirmed the TUN side: nebula needs an expli
 `/dev/net/tun` device node (self-creating it requires `CAP_MKNOD`, which the minimal capability
 set lacks), and a non-root run needs `NET_ADMIN` in the bounding set **plus** a file capability
 on the binary — either one alone fails. See the owning spec for the full capability matrix.
+## 2026-10-27 measured: the real build and run
+
+The predictions above now have their first real measurements, from a Debian 12 host
+(Docker 29.8.1, kernel 6.1.0-9-amd64) with `/dev/net/tun`.
+
+**Exit code.** `docker compose stop` against the running Lighthouse exited **2**, which is the
+`dieFromSignal` fallback the correction above predicted, not 143 and not 137. Across nine
+stops the exit code was 2 every time. The stop itself returned in **449 / 590 / 728 ms** against
+a 30 s grace period, so it is not the SIGKILL-after-timeout path.
+
+**Identity.** The CA fingerprint (`httpsCaFingerprint`) was byte-identical before and after a
+restart and after a full `up -d --force-recreate`, and `server-state.json`,
+`history.sqlite` (+ WAL) and `first-credentials.txt` (0600) all survived. The Node role kept
+its `id` across a restart too.
+
+**Nothing to add about the signal path itself** — the decision not to install a signal proxy
+stands, and "clean exit" still means the three checkable things listed under Consequences, not a
+graceful Nebula shutdown log.
+
+## 2026-10-27 measured: capabilities must be stamped last
+
+A build container's bounding set does not include NET_ADMIN (measured:
+`CapBnd=00000000a80425fb`). So once a binary carries `cap_net_admin=ep`, executing it *inside*
+the RUN step fails with `Operation not permitted` (exit 126) — the capability is granted for the
+container run, which gets NET_ADMIN from compose, not for the build.
+
+`nebula -version` therefore has to run **before** `setcap`, which is the order the Dockerfile now
+uses. This is packaging order, not a change to the product: the in-image smoke checks still run
+against the shipped bytes, and `getcap` afterwards proves both stamps landed.
+
+Related, and also measured: `setcap cap_net_admin+ep <a> <b>` fails on the **second** file with
+`fatal error: Invalid argument` under libcap 2.75 on this kernel, while each one-file call
+succeeds — it is not atomic, so `<a>` is already stamped when the command returns non-zero. Both
+the Dockerfile and `docker/entrypoint.sh` now call `setcap` once per file.
