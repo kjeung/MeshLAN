@@ -294,9 +294,14 @@ lh_fingerprint() {
 }
 
 lh_fp1="$(lh_fingerprint)"
-assert_matches "拿到 HTTPS CA 指纹（身份锚点）" "$lh_fp1" '^[0-9a-fA-F]{64}$'
-if ! printf '%s' "$lh_fp1" | grep -Eq '^[0-9a-fA-F]{64}$'; then
-  fail "指纹读取失败，后续"身份不变"两条断言不可信" "实际取值：[$lh_fp1]；状态文件里没有 httpsCaFingerprint 字段或该文件读不到"
+if printf '%s' "$lh_fp1" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+  pass "拿到 HTTPS CA 指纹（身份锚点）"
+else
+  # 这一条红了就说明后面两条「身份不变」不可信：它们比的是这个值。
+  # 首版正是在这里假绿的——读不到时两次都得到同一个错误串，比较自然相等。
+  fail "拿到 HTTPS CA 指纹（身份锚点）" \
+    "实际取值：[$lh_fp1]。状态文件里没有 httpsCaFingerprint 字段，或 state 文件读不到；\
+此时下面两条「身份不变」断言不可信，不要因为它们显示 PASS 就认为身份保住了。"
 fi
 
 lh_creds="$(compose exec -T lighthouse sh -c 'cat /var/lib/meshlan/first-credentials.txt' 2>/dev/null || true)"
