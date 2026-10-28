@@ -132,6 +132,8 @@ docker compose version >/dev/null 2>&1 || die "docker compose v2 不可用（本
 
 note "引擎：docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)；compose：$(docker compose version --short 2>/dev/null || echo unknown)"
 note "项目名：$PROJECT；配对端点：$PAIR_HOST；镜像：$IMAGE"
+# 版本戳：贴回来的日志要能自证跑的是哪一版脚本，否则旧版日志会和新版混在一起分不清。
+note "脚本指纹：$(sha256sum "$0" 2>/dev/null | cut -c1-16 || echo unavailable)；提交：$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 # 端口必须在这里就从定义文件读出来：下面的"宿主端口是否被占用"检查要用它们，
 # 而早前那版把读取放在第 2 段，检查时四个变量还是空串，等于什么都没检查。
