@@ -413,6 +413,33 @@ MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.10
 Node 的 profile 名固定为 `node`。它和 Lighthouse 共用同一个状态卷，但身份存放在子目录里；把
 `first-credentials.txt` 里的 `MLNODE1…` 哈希填到 Lighthouse 管理台的多节点页面即可。
 
+同主机部署时，主控要连到 Node 发布的 `18090/tcp`：compose 服务名只在同一 compose 网络内可解析，
+给 Lighthouse 加 `extra_hosts: {host.docker.internal: host-gateway}` 再用它当 `endpoint` 提交。
+
+### 反向代理与 SSO
+
+把 MeshLAN 放到 Traefik 后面、并用 Authentik 管管理台时，有两条**不能违反**的约束：
+
+1. **Traefik 只能 TCP 透传，不能终止 TLS。** 设备按 sha256 **指纹钉死**控制面证书
+   （`pinnedTLSConfig`，且要求链上恰好一张证书），换证书的中间层会让所有已配对设备同时掉线。
+2. **Authentik 只能保护 `/admin`，不能保护 `/v1/*`。** 设备与节点 API 是机器对机器，
+   凭 `Authorization` 头而非 cookie；被 SSO 拦会 302 到登录页，配对与心跳全线失败。
+   一个端口同时服务管理台与 API，所以必须在代理层按路径拆路由。
+
+完整步骤（含动态配置示例、Authentik provider 配置、路径白名单、故障排查）见
+[`docs/deployment-docker-traefik-authentik.md`](docs/deployment-docker-traefik-authentik.md)，
+决策理由见 [`docs/adr/0003-tls-passthrough-and-sso-boundary.md`](docs/adr/0003-tls-passthrough-and-sso-boundary.md)。
+
+### 验收脚本
+
+```bash
+docker/acceptance.sh
+```
+
+一条命令覆盖构建 → 配置校验 → 双 profile 健康 → 身份跨 restart 与 `--force-recreate` 不变 →
+四条 fail-fast → `MESHLAN_INIT_ONLY` → Node 起得来 → **Node 真配对**，结束自清理。它用独立项目名
+`meshlan-acceptance` 并在开跑前探测端口与同名栈，**不要在跑着真实部署的机器上直接跑**。
+
 ### Container usage (English)
 
 One image, one role per container (`MESHLAN_ROLE=lighthouse|node`); Relay is a Lighthouse capability,
