@@ -1,0 +1,21 @@
+# 验收用覆盖文件（只被 docker/acceptance.sh 使用，不影响产品部署）。
+#
+# 与 docker-compose.yml 的关系：叠加合并（-f docker-compose.yml -f docker/acceptance.compose.yml）。
+# 它只做两件产品定义里不该做的事：
+#   1. 换掉容器名 —— 产品定义的 container_name 是 meshlan-lighthouse / meshlan-node，
+#      验收脚本要能对着真实部署跑而不撞名（撞名会让 `compose up` 直接失败或误伤线上栈）。
+#   2. 给 Lighthouse 加 host.docker.internal —— 同主机配对时，主控要连 Node 发布的
+#      18090/tcp，而 compose 服务名只在同一 compose 网络内可解析（那不是"真的通"）。
+#      用宿主网关地址，判据与具体宿主 IP 解耦。
+#
+# 卷与项目名由脚本的 -p meshlan-acceptance 决定，这里不重复声明。
+
+services:
+  lighthouse:
+    container_name: meshlan-acceptance-lighthouse
+    extra_hosts:
+      # Linux 上 host-gateway 会被解析成宿主网关地址；Node 的 18090 发布在宿主上。
+      - "host.docker.internal:host-gateway"
+
+  node:
+    container_name: meshlan-acceptance-node
