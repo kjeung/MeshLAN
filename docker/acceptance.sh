@@ -27,10 +27,13 @@ IMAGE="${ACCEPTANCE_IMAGE:-meshlan:local}"
 PAIR_HOST="${MESHLAN_ACCEPTANCE_ENDPOINT:-host.docker.internal}"
 LH_PUBLIC_ENDPOINT="${MESHLAN_ACCEPTANCE_PUBLIC_ENDPOINT:-${PAIR_HOST}:4242}"
 
-LH_HTTP_PORT="${MESHLAN_ACCEPTANCE_LH_PORT:-8090}"
-LH_NEBULA_PORT="${MESHLAN_ACCEPTANCE_LH_NEBULA_PORT:-4242}"
-NODE_CTRL_PORT="${MESHLAN_ACCEPTANCE_NODE_CTRL_PORT:-18090}"
-NODE_NEBULA_PORT="${MESHLAN_ACCEPTANCE_NODE_NEBULA_PORT:-14242}"
+# 端口不设环境覆盖：compose 定义里宿主端口是写死的 1:1，给它一个覆盖口只会让
+# 「探针打哪个端口」和「compose 实际发布哪个端口」悄悄脱钩——第二次污染运行就是这么红的。
+# 四个端口一律从 `compose config` 现读（见「2. 配置校验」），读不到就直接失败。
+LH_HTTP_PORT=""
+LH_NEBULA_PORT=""
+NODE_CTRL_PORT=""
+NODE_NEBULA_PORT=""
 
 READY_TIMEOUT="${ACCEPTANCE_READY_TIMEOUT:-180}"
 PAIR_TIMEOUT="${ACCEPTANCE_PAIR_TIMEOUT:-120}"
@@ -108,6 +111,17 @@ compose() { docker compose -p "$PROJECT" -f "$BASE_COMPOSE" -f "$OVERRIDE_COMPOS
 
 section "前置条件"
 
+# 上一次运行或线上部署若在同一个 shell 里留下了这些变量，compose 会照它们改端口/端点，
+# 而脚本的探针仍打默认端口——第二次污染运行正是这样红的（宿主 8091 已被占，探针却打 8091）。
+# 验收必须从干净环境起跑：发现就拒绝，而不是替用户 unset（那会掩盖真实部署）。
+for leaked in MESHLAN_PUBLIC_ENDPOINT MESHLAN_NODE_PUBLIC_ENDPOINT MESHLAN_PAIRING_PORT MESHLAN_NEBULA_PORT MESHLAN_NODE_PAIRING_PORT MESHLAN_NODE_NEBULA_PORT MESHLAN_SUBNET MESHLAN_ROLE MESHLAN_INIT_ONLY; do
+  if [ -n "${!leaked:-}" ]; then
+    die "当前 shell 里残留了 $leaked=${!leaked}。验收要求干净环境（它自己会设置端点与角色）。
+  请先执行 unset $leaked（或直接开一个干净 shell 重跑）。脚本只认 MESHLAN_ACCEPTANCE_* 前缀的覆盖变量。"
+  fi
+done
+
+
 for bin in docker curl jq; do
   command -v "$bin" >/dev/null 2>&1 || die "缺 $bin（本脚本基线：bash 4+ / docker compose v2 / curl / jq）"
 done
@@ -118,6 +132,39 @@ docker compose version >/dev/null 2>&1 || die "docker compose v2 不可用（本
 
 note "引擎：docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)；compose：$(docker compose version --short 2>/dev/null || echo unknown)"
 note "项目名：$PROJECT；配对端点：$PAIR_HOST；镜像：$IMAGE"
+
+# 端口必须在这里就从定义文件读出来：下面的"宿主端口是否被占用"检查要用它们，
+# 而早前那版把读取放在第 2 段，检查时四个变量还是空串，等于什么都没检查。
+cfg_pre="$(compose --profile node config 2>/dev/null || true)"
+[ -n "$cfg_pre" ] || die "docker compose config 读不出任何内容，无法确定端口（先看 docker compose config 的报错）"
+
+port_of() {
+  # $1=服务名 $2=容器端口；输出 compose 实际发布的宿主端口。
+  # compose 对每个端口先出 target 再出 published，所以必须把两者收进同一组再比较；
+  # 早前"记住上一个 published"的写法会整体错位一个端口（8090 读成空、4242 读成 8090）。
+  printf '%s' "$cfg_pre" | awk -v svc="$1" -v want="$2" '
+    function flush() { if (tgt == want && pub != "") { print pub; found = 1 } tgt = ""; pub = "" }
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      flush(); cur = $0; sub(/^  /, "", cur); sub(/:.*/, "", cur); next
+    }
+    cur == svc && /^[[:space:]]*- / { flush(); next }
+    cur == svc && /target:/ { v = $0; sub(/.*target:[[:space:]]*/, "", v); gsub(/"/, "", v); tgt = v; next }
+    cur == svc && /published:/ { v = $0; sub(/.*published:[[:space:]]*/, "", v); gsub(/"/, "", v); pub = v; next }
+    END { if (!found) flush() }
+  '
+}
+
+LH_HTTP_PORT="$(port_of lighthouse 8090)"
+LH_NEBULA_PORT="$(port_of lighthouse 4242)"
+NODE_CTRL_PORT="$(port_of node 18090)"
+NODE_NEBULA_PORT="$(port_of node 14242)"
+
+for spec in "Lighthouse 配对端口:$LH_HTTP_PORT" "Lighthouse Nebula 端口:$LH_NEBULA_PORT" "Node 控制端口:$NODE_CTRL_PORT" "Node Nebula 端口:$NODE_NEBULA_PORT"; do
+  if ! printf '%s' "${spec#*:}" | grep -Eq '^[0-9]+$'; then
+    die "无法从 compose config 读出 ${spec%%:*}（实际取值：[${spec#*:}]）。定义文件的 ports 段被改坏了。"
+  fi
+done
+note "端口（读自 compose config）：Lighthouse ${LH_HTTP_PORT}/tcp + ${LH_NEBULA_PORT}/udp；Node ${NODE_CTRL_PORT}/tcp + ${NODE_NEBULA_PORT}/udp"
 
 if [ "$ACCEPTANCE_FORCE" != "1" ]; then
   busy=()
@@ -171,9 +218,12 @@ else
   fail "docker compose config 校验失败（node profile）" "见 $WORKDIR/config-node.log"
 fi
 
-cfg="$(compose --profile node config 2>/dev/null || true)"
-assert_contains "Lighthouse 的配对端口是 1:1，没有翻译" "$cfg" "published: \"$LH_HTTP_PORT\""
-assert_contains "Node 的控制端口是 1:1，没有翻译" "$cfg" "published: \"$NODE_CTRL_PORT\""
+# 端口已在「前置条件」里从定义文件读出（那里要用它做占用检查），这里只做取值断言。
+cfg="$cfg_pre"
+assert_eq "Lighthouse 配对端口 1:1，没有翻译" "$LH_HTTP_PORT" "8090"
+assert_eq "Lighthouse Nebula 端口 1:1，没有翻译" "$LH_NEBULA_PORT" "4242"
+assert_eq "Node 控制端口 1:1，没有翻译" "$NODE_CTRL_PORT" "18090"
+assert_eq "Node Nebula 端口 1:1，没有翻译" "$NODE_NEBULA_PORT" "14242"
 assert_contains "stop_grace_period 为 30s" "$cfg" "stop_grace_period: 30s"
 tun_mounts="$(printf '%s' "$cfg" | grep -c 'source: /dev/net/tun' || true)"
 assert_eq "两个服务都挂了 /dev/net/tun（自建 tun 需要 CAP_MKNOD，最小能力集里没有）" "$tun_mounts" "2"
@@ -235,8 +285,19 @@ pid1="$(compose exec -T lighthouse sh -c 'tr "\0" " " < /proc/1/cmdline; echo; g
 assert_matches "PID 1 是 meshlan 服务进程（入口已 exec）" "$pid1" '/usr/local/bin/meshlan'
 assert_matches "PID 1 以 uid 10001 运行（已降权）" "$pid1" 'Uid:[[:space:]]+10001[[:space:]]+10001'
 
-lh_fp1="$(compose exec -T lighthouse sh -c 'jq -r ".httpsCaFingerprint" /var/lib/meshlan/server-state.json' 2>/dev/null || echo missing)"
+# 镜像里没有 jq（Dockerfile 只装 ca-certificates/curl/libcap2-bin/util-linux），
+# 所以在容器内用 jq 读状态文件只会拿到 "not found"，再被下面的 assert_eq 当成
+# "两次一样"——那是假绿。改成把文件原样 cat 出来，在宿主上用 sed 取字段。
+lh_fingerprint() {
+  compose exec -T lighthouse sh -c 'cat /var/lib/meshlan/server-state.json' 2>/dev/null \
+    | sed -n 's/.*"httpsCaFingerprint":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+lh_fp1="$(lh_fingerprint)"
 assert_matches "拿到 HTTPS CA 指纹（身份锚点）" "$lh_fp1" '^[0-9a-fA-F]{64}$'
+if ! printf '%s' "$lh_fp1" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+  fail "指纹读取失败，后续"身份不变"两条断言不可信" "实际取值：[$lh_fp1]；状态文件里没有 httpsCaFingerprint 字段或该文件读不到"
+fi
 
 lh_creds="$(compose exec -T lighthouse sh -c 'cat /var/lib/meshlan/first-credentials.txt' 2>/dev/null || true)"
 LH_ADMIN_TOKEN="$(printf '%s' "$lh_creds" | sed -n 's/^管理令牌: //p' | head -n 1)"
@@ -271,7 +332,7 @@ else
   fail "restart 后没有转 healthy"
 fi
 
-lh_fp2="$(compose exec -T lighthouse sh -c 'jq -r ".httpsCaFingerprint" /var/lib/meshlan/server-state.json' 2>/dev/null || echo missing)"
+lh_fp2="$(lh_fingerprint)"
 assert_eq "restart 后 HTTPS CA 指纹不变（身份住在卷里）" "$lh_fp2" "$lh_fp1"
 
 hb="$(compose exec -T lighthouse sh -c 'test -s /var/lib/meshlan/history.sqlite && echo nonempty || echo empty' 2>/dev/null | tr -d "\r" || echo unknown)"
@@ -283,7 +344,7 @@ if wait_healthy lighthouse; then
 else
   fail "--force-recreate 后没有转 healthy" "见 $WORKDIR/recreate.log"
 fi
-lh_fp3="$(compose exec -T lighthouse sh -c 'jq -r ".httpsCaFingerprint" /var/lib/meshlan/server-state.json' 2>/dev/null || echo missing)"
+lh_fp3="$(lh_fingerprint)"
 assert_eq "--force-recreate 后 HTTPS CA 指纹不变（重建容器不重建 PKI）" "$lh_fp3" "$lh_fp1"
 
 leak="$(compose exec -T lighthouse sh -c 'ls -A /var/lib/meshlan/node 2>/dev/null | head -n 3 | tr "\n" " "' || true)"
@@ -316,7 +377,13 @@ assert_true "$([ "$rc_bad_port" -ne 0 ] && echo 1 || echo 0)" "非法端口以�
 init_vol="${PROJECT}-initonly"
 docker volume rm -f "$init_vol" >/dev/null 2>&1 || true
 set +e
+# 必须复刻 compose 给的运行时权限：入口会对 meshlan/nebula 打 file capability，
+# 而文件能力只有在 bounding set 里也有 NET_ADMIN 时才允许 exec（#7 能力矩阵第 I 行：
+# 有文件能力、bounding set 无 NET_ADMIN -> "exec ... operation not permitted"）。
+# 少了这两行，容器会在 exec 那一步以 1 退出，看起来像"INIT_ONLY 坏了"，其实是脚本没给够权限。
 docker run --rm \
+  --cap-add NET_ADMIN \
+  --device /dev/net/tun \
   -e MESHLAN_ROLE=lighthouse \
   -e MESHLAN_PUBLIC_ENDPOINT="$LH_PUBLIC_ENDPOINT" \
   -e MESHLAN_INIT_ONLY=1 \
@@ -325,6 +392,9 @@ docker run --rm \
 rc_init_only=$?
 set -e
 assert_eq "MESHLAN_INIT_ONLY=1 正常退出（只初始化，不启动服务）" "$rc_init_only" "0"
+if [ "$rc_init_only" != "0" ]; then
+  fail "INIT_ONLY 失败原因" "容器输出：$(head -c 1200 "$WORKDIR/init-only.log")"
+fi
 init_state="$(docker run --rm -v "$init_vol:/var/lib/meshlan" --entrypoint /bin/sh "$IMAGE" -c 'test -f /var/lib/meshlan/server-state.json && echo present || echo absent')"
 assert_eq "INIT_ONLY 模式确实写下了状态文件" "$init_state" "present"
 docker volume rm -f "$init_vol" >/dev/null 2>&1 || true
@@ -363,11 +433,13 @@ LH_SESSION="$(printf '%s' "$admin_session" | jq -r '.sessionToken // empty' 2>/d
 assert_matches "用管理令牌换来管理会话（纯 curl，不需要点管理台页面）" "$LH_SESSION" '^[A-Za-z0-9_-]{16,}'
 
 add_resp_file="$WORKDIR/add-node.json"
+# 注意：不要在这里写 `|| echo "000"`——curl 失败时 -w 已经会打出 "000"，
+# 两者叠加会得到 "000000"（第二次污染运行里就是这么显示的），断言就永远不可能对。
 add_code="$(curl -ksS --max-time 40 -o "$add_resp_file" -w '%{http_code}' -X POST \
   -H "X-MeshLAN-Admin-Session: $LH_SESSION" \
   -H 'Content-Type: application/json' \
   -d "$(jq -nc --arg e "$PAIR_HOST" --arg h "$NODE_HASH" --arg n "acceptance-node" '{endpoint:$e, hash:$h, name:$n}')" \
-  "https://127.0.0.1:$LH_HTTP_PORT/v1/admin/nodes" 2>/dev/null || echo "000")"
+  "https://127.0.0.1:$LH_HTTP_PORT/v1/admin/nodes" 2>/dev/null)" || add_code="000"
 add_body="$(cat "$add_resp_file" 2>/dev/null || true)"
 assert_eq "POST /v1/admin/nodes 返回 201（主控真的连上了 Node）" "$add_code" "201"
 if [ "$add_code" != "201" ]; then
@@ -376,7 +448,9 @@ fi
 
 NODE_ID="$(printf '%s' "$add_body" | jq -r '.node.id // empty' 2>/dev/null || true)"
 NODE_ADDR="$(printf '%s' "$add_body" | jq -r '.node.address // empty' 2>/dev/null || true)"
-assert_matches "主控分配了 Node 的虚拟地址" "$NODE_ADDR" '^10\.[0-9]+\.[0-9]+\.[0-9]+$'
+# allocateAddress 返回的是带前缀的 CIDR（10.77.0.2/24），不是裸 IP：它要原样签进 Nebula 证书。
+# 这里断言"在网段内的 IPv4/CIDR"，而不是脚本自己能想到的裸地址形状。
+assert_matches "主控分配了 Node 的虚拟地址（网段内的 IPv4/CIDR）" "$NODE_ADDR" '^10\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$'
 assert_matches "主控记录了 Node 的公开端点（端口来自 Node 的 /v1/node/info）" \
   "$(printf '%s' "$add_body" | jq -r '.node.publicEndpoint // empty' 2>/dev/null || true)" ":$NODE_NEBULA_PORT"
 
@@ -486,12 +560,15 @@ cat <<'CLOSING'
   健康转绿                  <- 探针指向需要认证的端点，或没检查 Content-Type（假绿/恒红）
   0600 + uid 10001          <- 入口没走 root -> chown -> setpriv
   PID 1 = meshlan           <- 入口引入信号代理或常驻 shell
-  CA 指纹跨 restart 不变    <- 状态根被写进镜像可写层（卷=身份被违背）
+  CA 指纹读得到（64 位十六进制）<- 状态文件里没有 httpsCaFingerprint；这时下面两条"不变"必须判红，
+                               而不是拿两个相同的错误值假装相等（首版就是这么假绿的）
   CA 指纹跨 recreate 不变   <- 同上，且 --force-recreate 被误当成「重建 PKI」
   历史库非空                <- 状态根没落到卷，或半截落盘
   缺地址 fail-fast          <- 入口开始猜 localhost 或探测出口地址
   非法角色 fail-fast        <- 角色校验被放宽成一个沉默的错误部署
-  INIT_ONLY 正常退出        <- 入口在只初始化模式下继续启动服务
+  INIT_ONLY 正常退出        <- 入口在只初始化模式下继续启动服务；
+                               也可能是本脚本没给够权限（入口要 setcap，bounding set 缺
+                               NET_ADMIN 时打 cap 的二进制 exec 会被拒，见 #7 能力矩阵第 I 行）
   Node 起得来               <- Node 与 Lighthouse 共用状态目录（身份互相污染）
   POST /v1/admin/nodes 201  <- 主控到 Node 的 18090 不通（host.docker.internal 没配）、
                                pin 校验被关掉，或 Node 已 enrolled
