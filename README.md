@@ -335,21 +335,28 @@ curl -fsSL "$MESHLAN_RELEASE_BASE_URL/download/node/upgrade.sh" | sudo -E bash
 所以 compose 里没有"relay 服务"。
 
 ```bash
-# 公网地址必填：Lighthouse 要“主机:端口”，Node 要纯主机（不带端口）
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d --build
+# 公网地址必填，但**只填一个地址**即可：端口由入口按角色补
+MESHLAN_IP=203.0.113.10 docker compose up -d --build
 ```
 
-首次启动会签发 CA、Lighthouse 证书与两套身份，随后拉起 Nebula。状态全部落在命名卷
-`meshlan-state` 的 `/var/lib/meshlan`（Node 用同一卷内的 `/var/lib/meshlan/node`）。
+不想手敲变量就用引导脚本，它会问几个问题、写好 `.env`、建好状态目录、校验 compose 再启动：
 
-**卷 = 身份 + 主密钥。删卷 = 重建整个 PKI，所有已配对设备永久失联。** 升级镜像只需
+```bash
+docker/bootstrap.sh
+```
+
+首次启动会签发 CA、Lighthouse 证书与两套身份，随后拉起 Nebula。状态全部落在**绑定目录**
+`./meshlan-state`（可用 `MESHLAN_STATE_DIR` 改）的 `/var/lib/meshlan`（Node 用同一目录内的
+`/var/lib/meshlan/node`）。用绑定目录而不是命名卷，是为了让「备份 = 打包一个目录」成立。
+
+**目录 = 身份 + 主密钥。删目录 = 重建整个 PKI，所有已配对设备永久失联。** 升级镜像只需
 `docker compose up -d --build`，重建容器不会改变 CA 指纹、配对码与历史库。
 
 ### 首次启动
 
-- 缺少 `MESHLAN_PUBLIC_ENDPOINT` 时容器立刻以非零码退出并打印一行可复制的命令，**不会**猜
-  localhost、也不会探测出口地址。
-- 这个地址在初始化时被写进状态，仓库里没有修改命令：**填错了只能删卷重建 PKI**。
+- 缺少 `MESHLAN_IP`（兼容写法 `MESHLAN_PUBLIC_ENDPOINT`）时容器立刻以非零码退出并打印一行可复制的
+  命令，**不会**猜 localhost、也不会探测出口地址。
+- 这个地址在初始化时被写进状态，仓库里没有修改命令：**填错了只能删状态目录重建 PKI**。
 - 初始化只认"本角色状态文件是否存在"作为幂等判据；状态文件不在但已有 `ca.key` 一类的材料时，
   入口报"上次初始化未完成"并退出，不会静默重跑（`nebula-cert` 的 `ca`/`sign` 拒绝覆盖）。
 - 只初始化、不启动服务：`MESHLAN_INIT_ONLY=1`。
@@ -385,7 +392,7 @@ docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/se
 
 不需要 root、不需要 `privileged`，也不加载任何内核模块，但 Nebula 要两样东西：`/dev/net/tun` 设备节点
 与 `NET_ADMIN` 能力。非 root 用户还需要二进制上的 file capability，入口会在启动前 `setcap` 并
-`setpriv` 降权到 uid/gid 10001（命名卷首次挂载的属主是 root，入口会先 `chown` 状态根）。
+`setpriv` 降权到 uid/gid 10001（状态目录首次出现时属主不是 10001，入口会先 `chown` 状态根；绑定目录时这会改宿主目录属主，属预期行为）。
 
 **健康检查的盲区**：`healthy` 只说明控制面在监听，既不说明 Nebula 打通，也不说明能配对。探针走免认证
 端点并对自签证书放行（`curl -k`），不验证证书链。
@@ -395,7 +402,7 @@ docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/se
 - `stop_grace_period: 30s`。**不要对退出码断言**：容器 init 受内核 `SIGNAL_UNKILLABLE` 保护，
   SIGTERM 到不了服务进程，143/137 都不是判据；看到 137 应读作"宽限期不够"。理由见
   `docs/adr/0001-no-graceful-shutdown-in-container.md`。
-- 备份是**冷备份**：停容器后整目录拷贝状态卷，必须连同 SQLite 的 WAL 附属文件一起。
+- 备份是**冷备份**：停容器后直接打包状态目录（`tar czf`），必须连同 SQLite 的 WAL 附属文件一起——整目录打包天然满足。
 - 外部主密钥（可选进阶）：`MESHLAN_MASTER_KEY_FILE` 指向平台 secret 后，**每条子命令都必须同时
   显式带 `-state`**，否则命令会找错默认路径、读不到主密钥。容器里的子命令用法：
 
@@ -406,11 +413,12 @@ docker compose exec lighthouse meshlan server list -state /var/lib/meshlan/serve
 ### Node 角色
 
 ```bash
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.100.20 \
-  docker compose --profile node up -d
+# Node 的地址缺省复用 MESHLAN_IP；要区分就设 MESHLAN_NODE_IP
+MESHLAN_IP=203.0.113.10 MESHLAN_NODE_IP=198.51.100.20 \
+  docker compose --profile node up -d --build
 ```
 
-Node 的 profile 名固定为 `node`。它和 Lighthouse 共用同一个状态卷，但身份存放在子目录里；把
+Node 的 profile 名固定为 `node`。它和 Lighthouse 共用同一个状态目录，但身份存放在子目录里；把
 `first-credentials.txt` 里的 `MLNODE1…` 哈希填到 Lighthouse 管理台的多节点页面即可。
 
 同主机部署时，主控要连到 Node 发布的 `18090/tcp`：compose 服务名只在同一 compose 网络内可解析，
@@ -443,10 +451,12 @@ docker/acceptance.sh
 ### Container usage (English)
 
 One image, one role per container (`MESHLAN_ROLE=lighthouse|node`); Relay is a Lighthouse capability,
-not a role. The image is built locally and **never pushed to a registry**. The public endpoint is
-required at first start and cannot be changed afterwards without recreating the PKI. State lives on the
-named volume `meshlan-state` (`/var/lib/meshlan`, Node in `/var/lib/meshlan/node`); **deleting the
-volume rebuilds the whole PKI**. Ports are mapped 1:1 (Lighthouse `8090/tcp` + `4242/udp`, Node
+not a role. The image is built locally and **never pushed to a registry**. Only one address is required
+at first start (`MESHLAN_IP=203.0.113.10`; the entrypoint appends the port per role) and it cannot be
+changed afterwards without recreating the PKI. State lives in the bind mount `./meshlan-state`
+(`/var/lib/meshlan`, Node in `/var/lib/meshlan/node`); **deleting that directory rebuilds the whole PKI**.
+Run `docker/bootstrap.sh` for an interactive setup that writes `.env` and prepares the directory.
+Ports are mapped 1:1 (Lighthouse `8090/tcp` + `4242/udp`, Node
 `18090/tcp` + `14242/udp`) because Node advertises exactly those ports. The container needs
 `/dev/net/tun` and `NET_ADMIN`; the entrypoint chowns the state root, sets the file capability, drops to
 uid 10001 and execs the server as PID 1 (no signal proxy, no exit-code assertions). A green health

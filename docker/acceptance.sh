@@ -25,6 +25,8 @@ OVERRIDE_COMPOSE="${ACCEPTANCE_OVERRIDE_COMPOSE:-docker/acceptance.compose.yml}"
 IMAGE="${ACCEPTANCE_IMAGE:-meshlan:local}"
 
 PAIR_HOST="${MESHLAN_ACCEPTANCE_ENDPOINT:-host.docker.internal}"
+# 状态根现在是绑定目录（产品定义默认 ./meshlan-state）。验收必须用一次性目录，不能碰真实部署的。
+ACCEPT_STATE_DIR="${MESHLAN_ACCEPTANCE_STATE_DIR:-}"
 LH_PUBLIC_ENDPOINT="${MESHLAN_ACCEPTANCE_PUBLIC_ENDPOINT:-${PAIR_HOST}:4242}"
 
 # 端口不设环境覆盖：compose 定义里宿主端口是写死的 1:1，给它一个覆盖口只会让
@@ -57,14 +59,19 @@ cleanup() {
       echo "尚未创建任何容器或卷（失败发生在前置条件/构建阶段），没有现场需要清理。"
     elif [ "$KEEP_ON_FAIL" = "1" ]; then
       echo "现场已保留，供取证（用完后手工清理）："
-      echo "  docker compose -p ${PROJECT} -f ${BASE_COMPOSE} -f ${OVERRIDE_COMPOSE} --profile node logs --no-color"
-      echo "  docker compose -p ${PROJECT} -f ${BASE_COMPOSE} -f ${OVERRIDE_COMPOSE} --profile node down -v --remove-orphans"
+      echo "  docker compose --env-file /dev/null -p ${PROJECT} -f ${BASE_COMPOSE} -f ${OVERRIDE_COMPOSE} --profile node logs --no-color"
+      echo "  docker compose --env-file /dev/null -p ${PROJECT} -f ${BASE_COMPOSE} -f ${OVERRIDE_COMPOSE} --profile node down -v --remove-orphans"
+      echo "  rm -rf ${ACCEPT_STATE_DIR:-<临时状态目录>}   # 状态是绑定目录，down -v 删不掉它"
     else
       echo "按 KEEP_ON_FAIL=0 清理现场。"
       compose --profile node down -v --remove-orphans >/dev/null 2>&1 || true
     fi
   fi
-  rm -rf "$WORKDIR"
+  if [ "$rc" -ne 0 ] && [ "$KEEP_ON_FAIL" = "1" ] && [ "$STARTED" = "1" ]; then
+    echo "  现场目录（含状态绑定目录）：$WORKDIR"
+  else
+    rm -rf "$WORKDIR"
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -107,14 +114,16 @@ assert_matches() {
 
 die() { printf '\n%s前置条件不满足%s：%s\n' "$c_red" "$c_reset" "$*" >&2; FAILED_STEP="前置条件"; exit 2; }
 
-compose() { docker compose -p "$PROJECT" -f "$BASE_COMPOSE" -f "$OVERRIDE_COMPOSE" "$@"; }
+# --env-file /dev/null：产品定义用 ${VAR:-缺省} 插值，会把仓库根的 .env（bootstrap 生成）读进来。
+# 验收必须与宿主部署配置完全隔离，否则改过端口的机器上，「1:1 端口」断言会红在一个假缺陷上。
+compose() { docker compose --env-file /dev/null -p "$PROJECT" -f "$BASE_COMPOSE" -f "$OVERRIDE_COMPOSE" "$@"; }
 
 section "前置条件"
 
 # 上一次运行或线上部署若在同一个 shell 里留下了这些变量，compose 会照它们改端口/端点，
 # 而脚本的探针仍打默认端口——第二次污染运行正是这样红的（宿主 8091 已被占，探针却打 8091）。
 # 验收必须从干净环境起跑：发现就拒绝，而不是替用户 unset（那会掩盖真实部署）。
-for leaked in MESHLAN_PUBLIC_ENDPOINT MESHLAN_NODE_PUBLIC_ENDPOINT MESHLAN_PAIRING_PORT MESHLAN_NEBULA_PORT MESHLAN_NODE_PAIRING_PORT MESHLAN_NODE_NEBULA_PORT MESHLAN_SUBNET MESHLAN_ROLE MESHLAN_INIT_ONLY; do
+for leaked in MESHLAN_IP MESHLAN_NODE_IP MESHLAN_PUBLIC_ENDPOINT MESHLAN_NODE_PUBLIC_ENDPOINT MESHLAN_STATE_DIR MESHLAN_PAIRING_PORT MESHLAN_NEBULA_PORT MESHLAN_NODE_PAIRING_PORT MESHLAN_NODE_NEBULA_PORT MESHLAN_SUBNET MESHLAN_ROLE MESHLAN_INIT_ONLY; do
   if [ -n "${!leaked:-}" ]; then
     die "当前 shell 里残留了 $leaked=${!leaked}。验收要求干净环境（它自己会设置端点与角色）。
   请先执行 unset $leaked（或直接开一个干净 shell 重跑）。脚本只认 MESHLAN_ACCEPTANCE_* 前缀的覆盖变量。"
@@ -126,11 +135,11 @@ for bin in docker curl jq; do
   command -v "$bin" >/dev/null 2>&1 || die "缺 $bin（本脚本基线：bash 4+ / docker compose v2 / curl / jq）"
 done
 [ "${BASH_VERSINFO[0]}" -ge 4 ] || die "需要 bash 4+（当前 $BASH_VERSION）"
-docker compose version >/dev/null 2>&1 || die "docker compose v2 不可用（本脚本不做 v1 降级）"
+docker compose --env-file /dev/null version >/dev/null 2>&1 || die "docker compose v2 不可用（本脚本不做 v1 降级）"
 [ -f "$BASE_COMPOSE" ] || die "找不到 $BASE_COMPOSE（请在仓库根目录执行）"
 [ -f "$OVERRIDE_COMPOSE" ] || die "找不到 $OVERRIDE_COMPOSE"
 
-note "引擎：docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)；compose：$(docker compose version --short 2>/dev/null || echo unknown)"
+note "引擎：docker $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)；compose：$(docker compose --env-file /dev/null version --short 2>/dev/null || echo unknown)"
 note "项目名：$PROJECT；配对端点：$PAIR_HOST；镜像：$IMAGE"
 # 版本戳：贴回来的日志要能自证跑的是哪一版脚本，否则旧版日志会和新版混在一起分不清。
 note "脚本指纹：$(sha256sum "$0" 2>/dev/null | cut -c1-16 || echo unavailable)；提交：$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -235,14 +244,22 @@ assert_eq "compose 只有 lighthouse 与 node 两个服务（Relay 是能力不�
 section "3. 首次启动（Lighthouse）"
 
 compose --profile node down -v --remove-orphans >/dev/null 2>&1 || true
-export MESHLAN_PUBLIC_ENDPOINT="$LH_PUBLIC_ENDPOINT"
-export MESHLAN_NODE_PUBLIC_ENDPOINT="$PAIR_HOST"
+# 状态根是绑定目录：给验收一条一次性路径，绝不碰真实部署的 ./meshlan-state。
+# 这个目录由脚本最后连同项目一起删掉（失败时按 KEEP_ON_FAIL 保留现场供取证）。
+ACCEPT_STATE_DIR="${ACCEPT_STATE_DIR:-$WORKDIR/state}"
+mkdir -p "$ACCEPT_STATE_DIR"
+chmod 0700 "$ACCEPT_STATE_DIR"
+export MESHLAN_STATE_DIR="$ACCEPT_STATE_DIR"
+# 产品定义只要求一个地址（端口由入口按角色补）；这里仍用 host.docker.internal，
+# 因为同主机配对要靠它，而且它同时就能验证 extra_hosts 生效。
+export MESHLAN_IP="$PAIR_HOST"
+export MESHLAN_NODE_IP="$PAIR_HOST"
 
 STARTED=1
 if compose up -d lighthouse >"$WORKDIR/up-lh.log" 2>&1; then
   pass "lighthouse 容器已启动（首次初始化）"
 else
-  fail "lighthouse 启动失败" "见 $WORKDIR/up-lh.log；常见原因：缺 MESHLAN_PUBLIC_ENDPOINT、端口占用"
+  fail "lighthouse 启动失败" "见 $WORKDIR/up-lh.log；常见原因：缺 MESHLAN_IP、端口占用"
   sed -n '1,40p' "$WORKDIR/up-lh.log" >&2 || true
   exit 1
 fi
@@ -275,7 +292,7 @@ assert_eq "管理台未开 TOTP（验收不做人机交互）" \
   "$(printf '%s' "$lh_auth_info" | jq -r '.totpRequired' 2>/dev/null || echo missing)" "false"
 
 state_root="$(compose exec -T lighthouse sh -c 'ls -A /var/lib/meshlan 2>/dev/null | tr "\n" " "' || true)"
-assert_contains "状态根落在 /var/lib/meshlan（命名卷）" "$state_root" "server-state.json"
+assert_contains "状态根落在 /var/lib/meshlan 并且服务真的把状态写进去" "$state_root" "server-state.json"
 assert_contains "CA 证书在状态根里" "$state_root" "ca.crt"
 assert_contains "Nebula 渲染配置在状态根里" "$state_root" "lighthouse.yml"
 assert_contains "历史数据库在状态根里" "$state_root" "history.sqlite"
@@ -369,20 +386,22 @@ run_once() {
 set +e
 run_once no-endpoint MESHLAN_ROLE=lighthouse; rc_no_endpoint=$?
 run_once bad-role MESHLAN_ROLE=relay; rc_bad_role=$?
-run_once no-role MESHLAN_PUBLIC_ENDPOINT=example.com:4242; rc_no_role=$?
-run_once bad-port MESHLAN_ROLE=lighthouse MESHLAN_PUBLIC_ENDPOINT=example.com:4242 MESHLAN_NEBULA_PORT=99999; rc_bad_port=$?
+run_once no-role MESHLAN_IP=example.com; rc_no_role=$?
+run_once bad-port MESHLAN_ROLE=lighthouse MESHLAN_IP=example.com MESHLAN_NEBULA_PORT=99999; rc_bad_port=$?
 set -e
 
-assert_true "$([ "$rc_no_endpoint" -ne 0 ] && echo 1 || echo 0)" "缺 MESHLAN_PUBLIC_ENDPOINT 时以非零码退出（实际 $rc_no_endpoint）"
-assert_contains "缺地址的失败信息点名字段" "$(cat "$WORKDIR/fail-no-endpoint.log")" "MESHLAN_PUBLIC_ENDPOINT"
+assert_true "$([ "$rc_no_endpoint" -ne 0 ] && echo 1 || echo 0)" "缺地址（MESHLAN_IP / MESHLAN_PUBLIC_ENDPOINT 都没设）时以非零码退出（实际 $rc_no_endpoint）"
+assert_true "$(grep -qE 'MESHLAN_(IP|PUBLIC_ENDPOINT)' "$WORKDIR/fail-no-endpoint.log" && echo 1 || echo 0)" \
+  "缺地址的失败信息点名字段（MESHLAN_IP 或 MESHLAN_PUBLIC_ENDPOINT）"
 assert_contains "缺地址的失败信息给出一行可复制命令" "$(cat "$WORKDIR/fail-no-endpoint.log")" "203.0.113.10"
 assert_true "$([ "$rc_bad_role" -ne 0 ] && echo 1 || echo 0)" "非法角色 relay 以非零码退出（实际 $rc_bad_role）"
 assert_contains "非法角色列出合法值" "$(cat "$WORKDIR/fail-bad-role.log")" "lighthouse、node"
 assert_true "$([ "$rc_no_role" -ne 0 ] && echo 1 || echo 0)" "缺 MESHLAN_ROLE 以非零码退出（实际 $rc_no_role）"
 assert_true "$([ "$rc_bad_port" -ne 0 ] && echo 1 || echo 0)" "非法端口以非零码退出（实际 $rc_bad_port）"
 
-init_vol="${PROJECT}-initonly"
-docker volume rm -f "$init_vol" >/dev/null 2>&1 || true
+init_dir="$WORKDIR/init-only-state"
+rm -rf "$init_dir"
+mkdir -p "$init_dir"
 set +e
 # 必须复刻 compose 给的运行时权限：入口会对 meshlan/nebula 打 file capability，
 # 而文件能力只有在 bounding set 里也有 NET_ADMIN 时才允许 exec（#7 能力矩阵第 I 行：
@@ -392,9 +411,9 @@ docker run --rm \
   --cap-add NET_ADMIN \
   --device /dev/net/tun \
   -e MESHLAN_ROLE=lighthouse \
-  -e MESHLAN_PUBLIC_ENDPOINT="$LH_PUBLIC_ENDPOINT" \
+  -e MESHLAN_IP="$PAIR_HOST" \
   -e MESHLAN_INIT_ONLY=1 \
-  -v "$init_vol:/var/lib/meshlan" \
+  -v "$init_dir:/var/lib/meshlan" \
   "$IMAGE" >"$WORKDIR/init-only.log" 2>&1
 rc_init_only=$?
 set -e
@@ -402,9 +421,9 @@ assert_eq "MESHLAN_INIT_ONLY=1 正常退出（只初始化，不启动服务）"
 if [ "$rc_init_only" != "0" ]; then
   fail "INIT_ONLY 失败原因" "容器输出：$(head -c 1200 "$WORKDIR/init-only.log")"
 fi
-init_state="$(docker run --rm -v "$init_vol:/var/lib/meshlan" --entrypoint /bin/sh "$IMAGE" -c 'test -f /var/lib/meshlan/server-state.json && echo present || echo absent')"
+init_state="$(docker run --rm -v "$init_dir:/var/lib/meshlan" --entrypoint /bin/sh "$IMAGE" -c 'test -f /var/lib/meshlan/server-state.json && echo present || echo absent')"
 assert_eq "INIT_ONLY 模式确实写下了状态文件" "$init_state" "present"
-docker volume rm -f "$init_vol" >/dev/null 2>&1 || true
+rm -rf "$init_dir"
 
 section "7. Node 角色起得来（未配对）"
 
@@ -536,9 +555,9 @@ section "9. 收尾"
 
 if [ "$FAIL" -eq 0 ]; then
   if compose --profile node down -v --remove-orphans >/dev/null 2>&1; then
-    pass "自清理：测试栈与命名卷已删除，宿主不留残骸"
+    pass "自清理：测试栈已删除，宿主不留残骸（状态目录随项目一起清掉）"
   else
-    fail "自清理失败" "请手工执行：docker compose -p $PROJECT -f $BASE_COMPOSE -f $OVERRIDE_COMPOSE --profile node down -v"
+    fail "自清理失败" "请手工执行：docker compose --env-file /dev/null -p $PROJECT -f $BASE_COMPOSE -f $OVERRIDE_COMPOSE --profile node down -v"
   fi
   leftovers="$(docker ps -a --format '{{.Names}}' | grep -E "^$PROJECT-" || true)"
   assert_eq "没有残留的验收容器" "$leftovers" ""

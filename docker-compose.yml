@@ -1,12 +1,26 @@
 # MeshLAN Linux 控制面的 compose 定义（契约见 issue #8）。
 #
-#   docker compose up -d               # 拉起一台默认 Lighthouse
-#   MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d
-#   docker compose --profile node up -d  # 再拉起一台 Node（同主机时端口错开）
+# 最省事的用法（只需要一个公网 IP，其余全有缺省值）：
+#
+#   MESHLAN_IP=203.0.113.10 docker compose up -d --build
+#
+# 或者交互式生成 .env 后直接起：
+#
+#   docker/bootstrap.sh                       # 问几个问题，写 .env，可选立刻 up
+#   docker compose up -d --build
+#
+# 再拉一台 Node（同主机时端口已错开，无需改任何东西）：
+#
+#   docker compose --profile node up -d --build
 #
 # 端口一律宿主 1:1，禁止端口翻译：Node 对外宣称的 Nebula 端点与配对载荷里的控制端口
 # 都会被主控原样取用，翻译映射会让主控连到错误端口。
 # Relay 是 Lighthouse 的能力，不是角色，因此这里没有“relay 服务”。
+#
+# 状态用**绑定目录**而不是命名卷：`./meshlan-state`（可用 MESHLAN_STATE_DIR 改）。
+# 理由：命名卷看不见、拷不走、`docker volume rm` 一敲就没了，而这里躺的是整台控制面的
+# 身份与主密钥。绑定目录让「备份 = 打包一个目录」成立，也让误删更不容易发生。
+# 目录 = 身份 + 主密钥：删目录 = 重建整个 PKI，所有已配对设备永久失联。
 
 name: meshlan
 
@@ -24,6 +38,12 @@ x-meshlan-common: &meshlan-common
   # 「只给 NET_ADMIN、让 nebula 自建 tun」不成立：自建需要 CAP_MKNOD，最小能力集里没有。
   devices:
     - /dev/net/tun:/dev/net/tun
+  # 同主机配对必需：主控要连 Node 发布的 18090/tcp，而 compose 服务名只在同一 compose
+  # 网络内可解析，那不是「真的通」。这里给宿主网关别名，Linux 与 Docker Desktop 都成立。
+  # 少了这一行，`POST /v1/admin/nodes` 会以 409 失败（响应体是「子节点 HTTP …: connection
+  # refused」而不是「子节点已存在」）——把别名写进产品定义，正是为了让 5.1 的文档命令照抄即通。
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   logging:
     driver: json-file
     options:
@@ -38,20 +58,22 @@ services:
     container_name: meshlan-lighthouse
     environment:
       MESHLAN_ROLE: lighthouse
-      # 必填、无缺省：写进状态后就改不动了（仓库里没有修改命令）。
-      MESHLAN_PUBLIC_ENDPOINT: ${MESHLAN_PUBLIC_ENDPOINT:-}
+      # 只需要填地址，端口由入口按角色补（Lighthouse：203.0.113.10 -> 203.0.113.10:4242）。
+      # 这个地址初始化时写进状态、之后改不动（仓库里没有修改命令），填错只能删状态目录重建 PKI。
+      MESHLAN_IP: ${MESHLAN_IP:-}
       MESHLAN_SUBNET: ${MESHLAN_SUBNET:-10.77.0.0/24}
       MESHLAN_NEBULA_PORT: ${MESHLAN_NEBULA_PORT:-4242}
       MESHLAN_PAIRING_PORT: ${MESHLAN_PAIRING_PORT:-8090}
     ports:
-      - "8090:8090/tcp"
-      - "4242:4242/udp"
+      - "${MESHLAN_PAIRING_PORT:-8090}:${MESHLAN_PAIRING_PORT:-8090}/tcp"
+      - "${MESHLAN_NEBULA_PORT:-4242}:${MESHLAN_NEBULA_PORT:-4242}/udp"
     volumes:
-      - meshlan-state:/var/lib/meshlan
+      # 绑定目录：备份就是打包它，恢复就是放回去。
+      - ${MESHLAN_STATE_DIR:-./meshlan-state}:/var/lib/meshlan
     healthcheck:
       # 免认证端点：同时走过 TLS 握手与 HTTP 路由；只认 Content-Type 为 JSON，
       # 否则 :8090 上任何返回 200 文本的路径都会假绿。自签证书只能 -k。
-      test: ["CMD-SHELL", "curl -kfsS -o /dev/null -w '%{content_type}' https://127.0.0.1:8090/v1/admin/auth-info | grep -qi 'application/json'"]
+      test: ["CMD-SHELL", "curl -kfsS -o /dev/null -w '%{content_type}' https://127.0.0.1:${MESHLAN_PAIRING_PORT:-8090}/v1/admin/auth-info | grep -qi 'application/json'"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -64,23 +86,20 @@ services:
     profiles: ["node"]
     environment:
       MESHLAN_ROLE: node
-      # Node 要纯主机（不带端口）：node-init 自己拼外部端点与控制端点。
-      MESHLAN_PUBLIC_ENDPOINT: ${MESHLAN_NODE_PUBLIC_ENDPOINT:-}
+      # Node 只填自己的公网地址。同主机部署可以直接复用 MESHLAN_IP；要区分就设 MESHLAN_NODE_IP。
+      MESHLAN_IP: ${MESHLAN_NODE_IP:-${MESHLAN_IP:-}}
       MESHLAN_NEBULA_PORT: ${MESHLAN_NODE_NEBULA_PORT:-14242}
       MESHLAN_PAIRING_PORT: ${MESHLAN_NODE_PAIRING_PORT:-18090}
     ports:
-      - "18090:18090/tcp"
-      - "14242:14242/udp"
+      - "${MESHLAN_NODE_PAIRING_PORT:-18090}:${MESHLAN_NODE_PAIRING_PORT:-18090}/tcp"
+      - "${MESHLAN_NODE_NEBULA_PORT:-14242}:${MESHLAN_NODE_NEBULA_PORT:-14242}/udp"
     volumes:
-      - meshlan-state:/var/lib/meshlan
+      # 与 Lighthouse 同一个绑定目录，身份落在其中的 node/ 子目录（issue #7 / #8）。
+      - ${MESHLAN_STATE_DIR:-./meshlan-state}:/var/lib/meshlan
     healthcheck:
       # 未配对时 Nebula 本就不启动，所以这里只要求它返回 JSON。
-      test: ["CMD-SHELL", "curl -kfsS -o /dev/null -w '%{content_type}' https://127.0.0.1:18090/v1/node/health | grep -qi 'application/json'"]
+      test: ["CMD-SHELL", "curl -kfsS -o /dev/null -w '%{content_type}' https://127.0.0.1:${MESHLAN_NODE_PAIRING_PORT:-18090}/v1/node/health | grep -qi 'application/json'"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 30s
-
-volumes:
-  # 卷 = 身份 + 主密钥；删卷 = 重建整个 PKI，已配对设备永久失联。
-  meshlan-state:

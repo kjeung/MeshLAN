@@ -297,24 +297,32 @@ sudo -E bash /tmp/install-mesh-node.sh --endpoint 198.51.100.20 --name edge-01
 能力であり、3 つ目のロールではありません**。したがって compose に「relay サービス」はありません。
 
 ```bash
-# 公衆アドレスは必須。Lighthouse は「ホスト:ポート」、Node はポートなしのホスト。
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d --build
+# 公衆アドレスは 1 つだけ指定すれば十分です（ポートはロールに応じてエントリポイントが補完）。
+MESHLAN_IP=203.0.113.10 docker compose up -d --build
 ```
 
-初回起動で CA と 2 つの ID を発行し、その後 Nebula を起動します。状態はすべて名前付きボリューム
-`meshlan-state` の `/var/lib/meshlan` に置かれます（Node は同じボリューム内の
-`/var/lib/meshlan/node`）。
+対話式に設定したい場合は、質問に答えるだけで `.env` と状態ディレクトリを作り、compose を検証してから
+起動するスクリプトがあります：
 
-**ボリューム = アイデンティティ + マスターキー。削除すると PKI の再構築となり、ペアリング済みの
+```bash
+docker/bootstrap.sh
+```
+
+初回起動で CA と 2 つの ID を発行し、その後 Nebula を起動します。状態はすべて**バインドマウント**
+`./meshlan-state`（`MESHLAN_STATE_DIR` で変更可）の `/var/lib/meshlan` に置かれます（Node は同じ
+ディレクトリ内の `/var/lib/meshlan/node`）。名前付きボリュームではなくバインドマウントにしたのは、
+「バックアップ = 1 つのディレクトリを固めるだけ」を成り立たせるためです。
+
+**ディレクトリ = アイデンティティ + マスターキー。削除すると PKI の再構築となり、ペアリング済みの
 端末はすべて永久に失われます。** 更新は `docker compose up -d --build` だけです。コンテナを作り直して
 も CA フィンガープリント、ペアリングコード、履歴データベースは変わりません。
 
 **初回起動**
 
-- `MESHLAN_PUBLIC_ENDPOINT` が無いとコンテナは直ちに非ゼロで終了し、コピーできるコマンドを 1 行
-  出力します。localhost を推測せず、外向きアドレスの自動検出もしません。
+- `MESHLAN_IP`（旧来の `MESHLAN_PUBLIC_ENDPOINT` も可）が無いとコンテナは直ちに非ゼロで終了し、
+  コピーできるコマンドを 1 行出力します。localhost を推測せず、外向きアドレスの自動検出もしません。
 - このアドレスは初期化時に状態へ書き込まれ、変更用のコマンドはありません。
-  **間違えた場合の唯一の復旧手段はボリューム削除と PKI の再構築です。**
+  **間違えた場合の唯一の復旧手段は状態ディレクトリの削除と PKI の再構築です。**
 - 冪等性の判定は「このロールの状態ファイルが存在するか」だけです。状態ファイルが無いのに
   `ca.key` などの材料が残っている場合は「前回の初期化が未完了」として停止し、黙って再実行は
   しません（`nebula-cert` の `ca`/`sign` は上書きを拒否します）。
@@ -353,7 +361,7 @@ docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/se
 
 root も `privileged` もカーネルモジュールも不要ですが、Nebula には `/dev/net/tun` と `NET_ADMIN`
 が必要です。非 root ではバイナリの file capability も必要なので、エントリポイントが `setcap` し、
-uid/gid 10001 へ `setpriv` で降格します（新規の名前付きボリュームは root 所有でマウントされるため、
+uid/gid 10001 へ `setpriv` で降格します（状態ディレクトリは初回作成時 10001 所有ではないため、
 先に状態ルートを `chown` します）。
 
 **ヘルスチェックの盲点**：`healthy` はコントロールプレーンが待ち受けていることだけを意味します。
@@ -375,11 +383,12 @@ Nebula が通っていることも、ペアリングできることも意味し�
 **Node ロール**
 
 ```bash
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.100.20 \
-  docker compose --profile node up -d
+# Node は既定で MESHLAN_IP を再利用します。別ホストなら MESHLAN_NODE_IP を設定してください。
+MESHLAN_IP=203.0.113.10 MESHLAN_NODE_IP=198.51.100.20 \
+  docker compose --profile node up -d --build
 ```
 
-プロファイル名は `node` 固定です（`relay` にはしません）。Node は Lighthouse と同じ状態ボリュームを
+プロファイル名は `node` 固定です（`relay` にはしません）。Node は Lighthouse と同じ状態ディレクトリを
 共有しますが、ID はサブディレクトリに置きます。`first-credentials.txt` の `MLNODE1…` ハッシュを
 Lighthouse のマルチノード管理画面で追加してください。
 

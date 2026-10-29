@@ -53,8 +53,8 @@ Traefik 层按路径分。
 | 内核 | 有 `/dev/net/tun`（`ls -l /dev/net/tun` 应存在） |
 | Docker | Engine 24+ 与 Compose v2 |
 | 端口 | 8090/tcp、4242/udp（Lighthouse）；18090/tcp、14242/udp（Node，可选） |
-| 公网地址 | 一个能写进状态的地址：Lighthouse 要 `host:4242`，Node 要**纯主机** |
-| 磁盘 | 镜像约 272 MB + 状态卷 |
+| 公网地址 | 一个能写进状态的地址，**只填 IP 或域名即可**（端口由入口按角色补） |
+| 磁盘 | 镜像约 272 MB + 状态目录（绑定目录，不是命名卷） |
 
 检查：
 
@@ -75,6 +75,12 @@ cd MeshLAN
 docker compose build
 ```
 
+也可以让引导脚本一次问完（推荐第一次部署用这个，它会顺带把 `.env` 与状态目录建好）：
+
+```bash
+docker/bootstrap.sh
+```
+
 镜像在本地构建，**不向任何 registry 发布**。
 
 验证：`docker images meshlan:local` 有记录；`docker run --rm --entrypoint /bin/sh meshlan:local \
@@ -87,20 +93,28 @@ docker compose build
 初始化时地址被**写进状态**，仓库里**没有修改命令**。填错只能删卷重建 PKI，
 所有已配对设备永久失联。
 
-| 角色 | 形状 | 例子 | 说明 |
-| --- | --- | --- | --- |
-| Lighthouse | `host:nebulaPort` | `203.0.113.10:4242` | 端口必填；服务把它原样存进状态、原样下发当客户端 `static_host_map` |
-| Node | **纯主机** | `198.51.100.20` | `node-init` 自己拼两次（对外端点 `host:nebulaPort`、控制端点 `host:controlPort`） |
+**你只需要填一个地址**（IP 或域名），变量是 `MESHLAN_IP`：
 
-IPv6 写成 `[addr]:port`。**不要填 localhost**，也不要用占位符——不猜、不探测出口地址是刻意设计。
+```bash
+MESHLAN_IP=203.0.113.10 docker compose up -d --build
+```
+
+| 角色 | 你填什么 | 入口替你变成什么 |
+| --- | --- | --- |
+| Lighthouse | `203.0.113.10` | `203.0.113.10:4242`（端口取 `MESHLAN_NEBULA_PORT`；被原样存进状态、下发当客户端 `static_host_map`） |
+| Node | `198.51.100.20` | 仍是纯主机（`node-init` 自己拼对外端点与控制端点） |
+
+兼容旧写法：`MESHLAN_PUBLIC_ENDPOINT` 仍然有效且优先级更高（通了就照它，形状按角色收紧）。IPv6 写成 `[addr]` 或裸 `addr` 都可以，入口会补方括号。**不要填 localhost**，也不要用占位符——不猜、不探测出口地址是刻意设计。
 
 ---
 
 ## 4. 首次启动 Lighthouse
 
 ```bash
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d
+MESHLAN_IP=203.0.113.10 docker compose up -d --build
 ```
+
+或者用引导脚本：`docker/bootstrap.sh --ip 203.0.113.10`（它会写 `.env`、建状态目录、校验 compose 再启动）。
 
 首次启动会：签发 CA 与 Lighthouse 证书 → 打开历史库 → 拉起 Nebula → 监听 TLS。
 
@@ -119,7 +133,7 @@ curl -kfsS -o /dev/null -w '%{content_type}\n' \
 
 ### 4.1 取一次性凭据
 
-配对哈希与管理令牌只在初始化时打印一次，同时落盘到状态卷内（`0600`）：
+配对哈希与管理令牌只在初始化时打印一次，同时落盘到状态目录内（`0600`）：
 
 ```bash
 docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
@@ -145,13 +159,12 @@ docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshla
 
 ## 5. 可选：加一台 Node
 
-Node 与 Lighthouse **共用同一命名卷**，但身份分目录（`/var/lib/meshlan/node`）。
+Node 与 Lighthouse **共用同一个绑定目录**（缺省 `./meshlan-state`），但身份分目录（`/var/lib/meshlan/node`）。
 
 ```bash
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 \
-MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.100.20 \
-MESHLAN_NODE_NEBULA_PORT=14242 \
-  docker compose --profile node up -d node
+# Node 的地址缺省会复用 MESHLAN_IP（同主机部署通常就该如此）；要区分就设 MESHLAN_NODE_IP
+MESHLAN_IP=203.0.113.10 MESHLAN_NODE_IP=198.51.100.20 \
+  docker compose --profile node up -d --build node
 ```
 
 取 Node 的哈希：
@@ -163,7 +176,13 @@ docker compose exec node cat /var/lib/meshlan/node/first-credentials.txt   # 子
 ### 5.1 在主控上加节点（可纯 API，适合自动化）
 
 同主机部署时，主控需要能连到 Node 发布的 `18090/tcp`。**compose 服务名只在同一
-compose 网络内可解析**，那不是「真的通」；用宿主网关别名：
+compose 网络内可解析**，那不是「真的通」；用宿主网关别名 `host.docker.internal`。
+产品定义（`docker-compose.yml`）已给两个服务都加了它，**不需要你再改 compose**：
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
 
 ```bash
 # 1) 管理令牌换会话
@@ -180,15 +199,25 @@ curl -kfsS -X POST \
   https://127.0.0.1:8090/v1/admin/nodes
 ```
 
-要让 Lighthouse 容器解析得到 `host.docker.internal`，给它加（验收用的
-`docker/acceptance.compose.yml` 就是这么做的）：
-
-```yaml
-services:
-  lighthouse:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-```
+> **看到 409 先别怀疑命令**：`POST /v1/admin/nodes` 把所有失败都回成 409，真正的
+> 原因在响应体里，不在状态码上。去掉 `-f`（`-f` 会把 body 吞掉）重发一次就能看到原文：
+>
+> ```bash
+> curl -ksS -X POST \
+>   -H "X-MeshLAN-Admin-Session: $SESSION" \
+>   -H 'Content-Type: application/json' \
+>   -d '{"endpoint":"host.docker.internal","hash":"MLNODE1…","name":"edge-01"}' \
+>   -w '\nHTTP %{http_code}\n' \
+>   https://127.0.0.1:8090/v1/admin/nodes
+> ```
+>
+> | 响应体 | 含义 | 处理 |
+> | --- | --- | --- |
+> | `子节点 HTTP …: connection refused` / `no such host` | 主控连不到 Node 的 `18090` | 确认 Node 容器在跑、端口 1:1 已发布、`extra_hosts` 在；或把 `endpoint` 换成宿主真实 IP |
+> | `子节点已存在或名称冲突` | 同 ID / 同名 / 同控制端点已在状态里 | 换 `name`，或先在管理台删掉旧记录 |
+> | `子节点身份不匹配或已经加入其他主控` | 该 Node 已 enroll 过（或哈希过期） | 删掉 Node 的状态目录重新初始化（`first-credentials.txt` 里会出新哈希） |
+> | `子节点哈希格式无效` / `编码无效` | `hash` 抄漏了 `MLNODE1.` 前缀或换行 | 从 `first-credentials.txt` 里整行复制 |
+>
 
 验证配对成功（三步都要过）：
 
@@ -423,16 +452,20 @@ Authentik 保护**管理台**，而管理台本身已经有一道 `管理令牌 
 
 ### 9.2 备份（必须冷备）
 
+状态是**绑定目录**（缺省 `./meshlan-state`），所以备份就是打包一个目录，不需要借容器：
+
 ```bash
 docker compose stop
-docker run --rm -v meshlan_meshlan-state:/src -v "$PWD/backup":/dst alpine \
-  sh -c 'cd /src && tar czf /dst/meshlan-state-$(date +%F).tgz .'
+tar czf backup/meshlan-state-$(date +%F).tgz meshlan-state
 docker compose start
 ```
 
-必须**连同 SQLite 的 WAL 附属文件**一起（`history.sqlite-wal`、`-shm`）。
+`meshlan-state` 里是身份与主密钥，权限 0700、属主 10001。打包成 root 或同 uid 都行，
+但**别把归档放进仓库**（`.gitignore` 已排除状态目录本身，归档目录请自行处理）。
 
-> **卷 = 身份 + 主密钥。删卷 = 重建整个 PKI，所有已配对设备永久失联。**
+必须**连同 SQLite 的 WAL 附属文件**一起（`history.sqlite-wal`、`-shm`）——整目录打包天然满足这一点。
+
+> **目录 = 身份 + 主密钥。删目录 = 重建整个 PKI，所有已配对设备永久失联。**
 
 ### 9.3 升级
 
@@ -468,12 +501,12 @@ docker/acceptance.sh
 | --- | --- |
 | 设备全部连不上，日志却正常 | Traefik 是否 terminate 了 TLS（违反 0.1） |
 | 配对/心跳 302 到登录页 | SSO 误挡了 `/v1/*`（违反 0.2） |
-| 容器起不来，提示缺地址 | `MESHLAN_PUBLIC_ENDPOINT` 未设；地址形状按角色（Lighthouse 带端口 / Node 纯主机） |
-| 首次初始化后重启报「材料已存在」 | 上次初始化中途失败；需清空状态卷重来 |
+| 容器起不来，提示缺地址 | `MESHLAN_IP`（或 `MESHLAN_PUBLIC_ENDPOINT`）未设；**只填地址**，端口由入口按角色补 |
+| 首次初始化后重启报「材料已存在」 | 上次初始化中途失败；需清空状态目录重来 |
 | `healthy` 但设备配不上 | 正常现象，见 9.4；查 UDP 4242 与端点地址 |
-| Node 加不进 | 主控到 Node `18090` 不通；同主机需 `host.docker.internal` 或宿主 IP |
+| Node 加不进，返回 409 | 409 是笼统码，**看响应体**（见 5.1 表）：多半是主控到 Node `18090` 不通 |
 | 容器内 Nebula 起不来 | `/dev/net/tun` 与 `NET_ADMIN` 是否给到（两样缺一不可） |
-| 想改公网地址 | **做不到**，只能删卷重建 PKI；见第 3 节 |
+| 想改公网地址 | **做不到**，只能删状态目录重建 PKI；见第 3 节 |
 
 ---
 
@@ -482,14 +515,15 @@ docker/acceptance.sh
 | 变量 | 角色 | 映射到 | 缺省 |
 | --- | --- | --- | --- |
 | `MESHLAN_ROLE` | 两者 | 入口分派 | 无，必填 `lighthouse` / `node` |
-| `MESHLAN_PUBLIC_ENDPOINT` | Lighthouse | `-endpoint`，须 `host:4242` | 无，缺失即失败 |
-| `MESHLAN_PUBLIC_ENDPOINT` | Node | `-endpoint`，须纯主机 | 无，缺失即失败 |
-| `MESHLAN_NODE_PUBLIC_ENDPOINT` | Node（compose） | 同上 | 无 |
+| **`MESHLAN_IP`** | **两者** | **`-endpoint`（入口按角色补形状）** | **无，但只填地址即可** |
+| `MESHLAN_PUBLIC_ENDPOINT` | 两者（兼容） | 同上，优先级高于 `MESHLAN_IP` | 无 |
+| `MESHLAN_NODE_IP` | Node（compose） | 同 `MESHLAN_IP`，缺省复用 `MESHLAN_IP` | 复用 |
+| `MESHLAN_STATE_DIR` | 两者（compose） | 宿主绑定目录 → `/var/lib/meshlan` | `./meshlan-state` |
 | `MESHLAN_SUBNET` | 仅 Lighthouse | `-subnet` | `10.77.0.0/24` |
 | `MESHLAN_NEBULA_PORT` | 两者 | `-nebula-port` | Lighthouse `4242` / Node `14242` |
 | `MESHLAN_PAIRING_PORT` | Lighthouse | `-pairing-port` | `8090` |
 | `MESHLAN_NODE_PAIRING_PORT` | Node（compose） | `-control-port` | `18090` |
 | `MESHLAN_INIT_ONLY` | 两者 | 入口自身 | 关闭 |
-| `MESHLAN_MASTER_KEY_FILE` | 两者 | 外部主密钥 | 不设（默认在卷内） |
+| `MESHLAN_MASTER_KEY_FILE` | 两者 | 外部主密钥 | 不设（默认在状态目录内） |
 
-空串视为未设置。命令行参数优先于环境变量。
+空串视为未设置。命令行参数优先于环境变量。`MESHLAN_IP` 是便利变量：只填地址，端口与形状由入口按角色补。

@@ -30,6 +30,9 @@ coverage.out
 *.crt
 credentials/
 
+# 部署状态（绑定目录，不是命名卷）：身份与主密钥在这里，永远不进版本库
+/meshlan-state/
+
 # Local IDE/OS files
 .idea/
 .vscode/

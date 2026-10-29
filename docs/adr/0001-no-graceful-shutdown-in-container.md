@@ -61,7 +61,13 @@ creates subdirectories normally. So the entrypoint **always** runs
 
 `root → chown the state root → setpriv → exec the server`,
 
-not just when acceptance proves it is needed. The "no signal proxy, service is PID 1"
+not just when acceptance proves it is needed.
+
+*(2026-10-29 note: the product compose now mounts the state root as a bind directory
+(`./meshlan-state`), not a named volume. The measurement above stays valid — a bind directory
+inherits the host owner, which is likewise not 10001 — so the fixed chown path still applies;
+the only new consequence is that `chown -R` now changes the owner on the host side, which
+`docker/bootstrap.sh` pre-empts by aligning the directory to 10001 before first start.)* The "no signal proxy, service is PID 1"
 decision still stands, because the exec'd process is still the server; only the privilege
 drop moves earlier. The same probe confirmed the TUN side: nebula needs an explicit
 `/dev/net/tun` device node (self-creating it requires `CAP_MKNOD`, which the minimal capability

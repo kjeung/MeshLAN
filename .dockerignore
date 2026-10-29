@@ -52,6 +52,9 @@ credentials/
 # 文档与截图（构建不需要）
 docs
 
+# 部署状态目录（绑定目录）：构建上下文不该带上任何身份/主密钥
+meshlan-state
+
 # 只服务于 Windows 客户端的资源与工具脚本
 cmd/meshlan/web
 cmd/meshlan/assets

@@ -82,6 +82,99 @@ esac
 require_port MESHLAN_NEBULA_PORT "$NEBULA_PORT"
 require_port MESHLAN_PAIRING_PORT "$PAIRING_PORT"
 
+# ---------------------------------------------------------------- 端点归一化
+#
+# MESHLAN_IP 只填一个地址（IP 或域名）就能跑：入口按角色把它补成该角色要的形状。
+# 为什么不把两种形状都塞给用户：`server init -endpoint` 收「主机:端口」（它被原样下发成
+# static_host_map），`server node-init -endpoint` 收纯主机（它自己拼两次）。填错了在
+# `nebula -test` 与配对阶段才炸，离用户敲命令的地方太远（#8 的对抗式复核实测过：
+# `203.0.113.10` 与 `203.0.113.10:4242:4242` 都让 nebula 以 1 退出）。
+#
+# 规则：MESHLAN_PUBLIC_ENDPOINT 仍是权威变量，形状按角色收紧；MESHLAN_IP 是便利输入，
+# 优先级低于前者。两者都没有时不猜，直接 fail fast（不探测出口地址，理由同 README）。
+
+split_endpoint() {
+  # 把用户输入拆成 EP_HOST + EP_PORT（EP_PORT 为空表示"没写端口"）。
+  # 规则：IPv6 一律要方括号（[2001:db8::1] 或 [2001:db8::1]:4242），裸 IPv6 字面量按"没有端口"处理——
+  # 因为它里面有多个冒号，按冒号切会把地址切坏。
+  EP_HOST=''
+  EP_PORT=''
+  value="$(printf '%s' "${1:-}")"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  case "$value" in
+    \[*\]:*)
+      EP_HOST="${value#\[}"; EP_HOST="${EP_HOST%%\]*}"
+      EP_PORT="${value##*\]:}"
+      ;;
+    \[*\])
+      EP_HOST="${value#\[}"; EP_HOST="${EP_HOST%\]}"
+      ;;
+    \[*)
+      die "$ENV_SOURCE=[$value] 方括号没有闭合"
+      ;;
+    *)
+      colons="$(printf '%s' "$value" | tr -cd ':' | wc -c | tr -d '[:space:]')"
+      if [ "$colons" -gt 1 ]; then
+        # 多个冒号又没有方括号 —— 这是裸 IPv6 字面量，整体当主机，不切端口。
+        EP_HOST="$value"
+      elif [ "$colons" -eq 1 ]; then
+        EP_HOST="${value%%:*}"
+        EP_PORT="${value#*:}"
+        case "$EP_PORT" in
+          ""|*[!0-9]*)
+            die "$ENV_SOURCE=[$value] 的端口部分不是数字；只填地址即可，端口由入口补"
+            ;;
+        esac
+      else
+        EP_HOST="$value"
+      fi
+      ;;
+  esac
+  case "$EP_HOST" in
+    ""|*[!0-9A-Za-z.:_-]*) die "$ENV_SOURCE=[$value] 不是一个合法的 IP 或主机名" ;;
+    *..*) die "$ENV_SOURCE=[$value] 不是一个合法的 IP 或主机名" ;;
+  esac
+  if [ -n "$EP_PORT" ]; then
+    require_port "$ENV_SOURCE 的端口部分" "$EP_PORT"
+  fi
+}
+
+if [ -z "$ENDPOINT" ] && [ -n "${MESHLAN_IP:-}" ]; then
+  ENDPOINT="$MESHLAN_IP"
+  ENV_SOURCE=MESHLAN_IP
+else
+  ENV_SOURCE=MESHLAN_PUBLIC_ENDPOINT
+fi
+
+if [ -n "$ENDPOINT" ]; then
+  split_endpoint "$ENDPOINT"
+  case "$ROLE" in
+    lighthouse)
+      # Lighthouse 的 -endpoint 是「主机:端口」，端口缺省取本角色的 Nebula 端口。
+      # 用户显式写了端口就尊重它（他多半改了 MESHLAN_NEBULA_PORT，想两端对齐）；
+      # 只提示不覆盖——静默改用户写下的值比让他看到不一致更坏。
+      if [ -z "$EP_PORT" ]; then
+        EP_PORT="$NEBULA_PORT"
+      elif [ "$EP_PORT" != "$NEBULA_PORT" ]; then
+        warn "端点里的端口 $EP_PORT 与 MESHLAN_NEBULA_PORT=$NEBULA_PORT 不一致；按你写的 $EP_PORT 写入状态（Nebula 实际监听仍是 $NEBULA_PORT）"
+      fi
+      case "$EP_HOST" in
+        *:*) ENDPOINT="[$EP_HOST]:$EP_PORT" ;;
+        *)   ENDPOINT="$EP_HOST:$EP_PORT" ;;
+      esac
+      ;;
+    node)
+      # Node 的 -endpoint 必须是纯主机：node-init 自己拼外部端点与控制端点。
+      # 用户给的端口会被 node-init 用自己的 -nebula-port 覆盖，这里直接提醒，不装作没看见。
+      if [ -n "$EP_PORT" ]; then
+        warn "Node 的端点只收纯主机；已忽略你写的端口 $EP_PORT（Nebula 端口由 MESHLAN_NEBULA_PORT=$NEBULA_PORT 决定）"
+      fi
+      ENDPOINT="$EP_HOST"
+      ;;
+  esac
+fi
+
 INIT_ONLY=0
 case "${MESHLAN_INIT_ONLY:-}" in
   ""|0|false|no|off) INIT_ONLY=0 ;;
@@ -105,10 +198,15 @@ as_user() {
 }
 
 prepare_runtime() {
-  # 命名卷首次挂载的属主是 0:0，非 root 写不进去（2026-10-27 实测）——这条是固定路径，不是备用分支。
+  # 状态根无论命名卷还是绑定目录，首次都以 root 属主出现（命名卷 2026-10-27 实测；绑定目录沿用
+  # 宿主的属主，通常也不是 10001），非 root 写不进去 —— 这条是固定路径，不是备用分支。
+  # 注意 `chown -R` 会改宿主目录的属主（绑定目录时）。这是有意的：状态根里是身份与主密钥，
+  # 属主必须是运行用户，否则 0700 之后的目录连入口自己都改不动。要避免宿主侧属主变化，
+  # 就自己先把目录 chown 成 10001 再起容器（bootstrap 就是这么做的）。
   if [ "$AS_ROOT" = "1" ]; then
     mkdir -p "$STATE_DIR"
-    chown -R "$RUN_UID:$RUN_GID" "$STATE_DIR"
+    chown -R "$RUN_UID:$RUN_GID" "$STATE_DIR" 2>/dev/null \
+      || die "无法把状态根 $STATE_DIR 的属主改为 $RUN_UID:$RUN_GID（绑定目录时通常是 SELinux/只读挂载或宿主权限不足）"
     chmod 0700 "$STATE_DIR"
     if command -v setcap >/dev/null 2>&1; then
       # 非 root 的 Nebula 需要“bounding set 里有 NET_ADMIN”+“二进制 file capability”两样齐备。
@@ -183,8 +281,9 @@ capture_credentials() {
 
 run_init() {
   if [ -z "$ENDPOINT" ]; then
-    die "缺少 MESHLAN_PUBLIC_ENDPOINT，拒绝初始化（不猜 localhost、不探测出口地址）。
-  这个地址在初始化时被写进状态，仓库里没有修改命令，写错就只能删卷重建 PKI。
+    die "缺少 MESHLAN_IP（或 MESHLAN_PUBLIC_ENDPOINT），拒绝初始化（不猜 localhost、不探测出口地址）。
+  只填一个 IP 或域名即可，端口由入口按角色补：MESHLAN_IP=203.0.113.10。
+  这个地址在初始化时被写进状态，仓库里没有修改命令，写错就只能删状态目录重建 PKI。
   $(role_endpoint_hint)"
   fi
   log "首次初始化 $ROLE：状态文件不在、状态根没有残留材料；公网端点 $ENDPOINT（写入后不可改）"
@@ -236,9 +335,9 @@ init_failed() {
 
 role_endpoint_hint() {
   if [ "$ROLE" = "lighthouse" ]; then
-    printf 'Lighthouse 要“主机:端口”，例如：MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:%s' "$NEBULA_PORT"
+    printf 'Lighthouse 只填宿主公网地址即可，例如：MESHLAN_IP=203.0.113.10（入口会补成 203.0.113.10:%s）' "$NEBULA_PORT"
   else
-    printf 'Node 要纯主机（不带端口），例如：MESHLAN_PUBLIC_ENDPOINT=198.51.100.20'
+    printf 'Node 只填本机公网地址即可，例如：MESHLAN_IP=198.51.100.20（入口自拼控制端点与 Nebula 端点）'
   fi
 }
 

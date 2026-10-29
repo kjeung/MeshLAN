@@ -293,24 +293,33 @@ One image, one role per container (`MESHLAN_ROLE=lighthouse|node`). **Relay is a
 Lighthouse, not a third role**, so there is no "relay service" in the compose file.
 
 ```bash
-# The public endpoint is required. Lighthouse wants "host:port"; Node wants a bare host.
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 docker compose up -d --build
+# One address is required, and that is all: the entrypoint appends the port per role.
+MESHLAN_IP=203.0.113.10 docker compose up -d --build
 ```
 
-The first start signs the CA and both identities, then starts Nebula. All state lands on the named
-volume `meshlan-state` at `/var/lib/meshlan` (Node uses `/var/lib/meshlan/node` inside the same
-volume).
+Prefer an interactive setup? It asks a few questions, writes `.env`, prepares the state directory and
+validates the compose file before starting anything:
 
-**The volume is the identity and the master key. Deleting it rebuilds the whole PKI and every paired
+```bash
+docker/bootstrap.sh
+```
+
+The first start signs the CA and both identities, then starts Nebula. All state lands in the **bind
+mount** `./meshlan-state` (override with `MESHLAN_STATE_DIR`) at `/var/lib/meshlan` (Node uses
+`/var/lib/meshlan/node` inside the same directory). A bind mount rather than a named volume, so that
+"backup = archive one directory" actually holds.
+
+**The directory is the identity and the master key. Deleting it rebuilds the whole PKI and every paired
 device is lost for good.** Upgrading is just `docker compose up -d --build`; recreating the container
 keeps the CA fingerprint, the pairing codes and the history database.
 
 **First start**
 
-- With no `MESHLAN_PUBLIC_ENDPOINT` the container exits non-zero immediately and prints one copyable
-  command. It does **not** guess localhost and does **not** probe the egress address.
+- With no `MESHLAN_IP` (the legacy `MESHLAN_PUBLIC_ENDPOINT` also works) the container exits non-zero
+  immediately and prints one copyable command. It does **not** guess localhost and does **not** probe
+  the egress address.
 - That address is written into the state at init time and there is no command to change it:
-  **get it wrong and the only way back is deleting the volume and rebuilding the PKI.**
+  **get it wrong and the only way back is deleting the state directory and rebuilding the PKI.**
 - Initialisation is idempotent on one criterion only: does this role's state file exist. If the state
   file is missing while init material (`ca.key` and friends) is already there, the entrypoint refuses
   with "the previous init did not finish" instead of silently re-running (`nebula-cert`'s `ca`/`sign`
@@ -350,8 +359,9 @@ at the wrong port.
 
 No root, no `privileged`, no kernel modules — but Nebula needs two things: the `/dev/net/tun` device node
 and the `NET_ADMIN` capability. A non-root process also needs a file capability on the binary, so the
-entrypoint `setcap`s it and `setpriv`s down to uid/gid 10001 (a freshly created named volume mounts owned
-by root, so the entrypoint chowns the state root first).
+entrypoint `setcap`s it and `setpriv`s down to uid/gid 10001 (the state directory does not belong to
+10001 on first creation, so the entrypoint chowns it first — with a bind mount that changes the host
+directory's owner, which is intended).
 
 **The blind spot of the health check**: `healthy` means the control plane is listening. It does not mean
 Nebula is up, and it does not mean pairing works. The probe uses unauthenticated endpoints, accepts the
@@ -375,11 +385,12 @@ docker compose exec lighthouse meshlan server list -state /var/lib/meshlan/serve
 **Node role**
 
 ```bash
-MESHLAN_PUBLIC_ENDPOINT=203.0.113.10:4242 MESHLAN_NODE_PUBLIC_ENDPOINT=198.51.100.20 \
-  docker compose --profile node up -d
+# A Node reuses MESHLAN_IP by default; set MESHLAN_NODE_IP when it lives elsewhere.
+MESHLAN_IP=203.0.113.10 MESHLAN_NODE_IP=198.51.100.20 \
+  docker compose --profile node up -d --build
 ```
 
-The profile name is `node` (never `relay`). A Node shares the state volume with the Lighthouse but keeps
+The profile name is `node` (never `relay`). A Node shares the state directory with the Lighthouse but keeps
 its identity in a subdirectory; take the `MLNODE1…` hash from `first-credentials.txt` and add the node on
 the Lighthouse's multi-node admin page.
 
