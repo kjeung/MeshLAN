@@ -239,6 +239,23 @@ meshlan-nebula-node-linux-arm64
 SHA256SUMS.txt
 ```
 
+**Windows マシンがなくてもクライアントをビルドできます。** `cmd/meshlan` は純粋な Go で、
+既定で `CGO_ENABLED=0` のため、Linux/macOS からクロスコンパイルできます：
+
+```bash
+VERSION="$(cat VERSION)"
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+  -ldflags "-s -w -H=windowsgui -X main.clientVersion=meshlan-nebula/$VERSION" \
+  -o dist/MeshLAN-Nebula-Windows.exe ./cmd/meshlan
+```
+
+生成物は PE32+ / amd64 / **GUI サブシステム**のバイナリ（コンソールアプリではありません）で、
+約 15 MB です。
+
+> **このリポジトリは GitHub リリースを一切公開していません**（タグのみ）。`dist/` も
+> コミットされません。既成の exe は `build.ps1` か、Actions の成果物（コミット単位で
+> ダウンロード可能、期限あり）から得られます。
+
 ### メインサーバーを初期化
 
 次の公開アドレス、ポート、パスは実環境に合わせて変更してください。
@@ -276,6 +293,66 @@ sudo /usr/local/bin/meshlan-nebula server init \
 初回起動時に端末名、メインサーバーのアドレス、`MLN1...` ワンタイム登録ハッシュを
 入力します。Nebula 秘密鍵はクライアント上で生成され、`Nebula` Windows サービスが
 インストールされます。デスクトップウィンドウを閉じても仮想ネットワークは切断されません。
+
+#### ランタイムディレクトリ（`nebula.exe` の置き場所）
+
+**`nebula.exe` を `MeshLAN-Nebula-Windows.exe` と同じディレクトリに置いてはいけません**。
+場所はコードで固定されており、exe の位置とは無関係です
+（`cmd/meshlan/client_windows.go:1970`）：
+
+```text
+%APPDATA%\MeshLANNebula\        <- appRoot() = os.UserConfigDir()/MeshLANNebula
+├── client\                     <- クライアント状態。削除すると初期化（再ペアリングが必要）
+│   ├── client-state.json
+│   ├── history.sqlite
+│   ├── host.key / host.pub / host.crt / ca.crt   <- ペアリング後に生成
+│   ├── config.yml              <- レンダリングされた nebula 設定
+│   └── (file-shares.json, shares\, updates\, apply-update.ps1, ...)
+├── native-webview2\EBWebView\  <- WebView2 キャッシュ。削除可、自動再生成
+└── runtime\
+    └── nebula-v1.11.0\         <- runtimeDir = root/runtime/nebula-v<バージョン>
+        ├── nebula.exe          <- 必須
+        ├── nebula-cert.exe     <- 必須
+        └── dist\windows\wintun\
+            └── bin\amd64\wintun.dll   <- 必須（nebula.exe が実行時に読み込む）
+```
+
+`ensureNebulaRuntime` は**2 ファイル揃っている**場合のみダウンロードを省略します。
+`nebula.exe` だけ置いても再ダウンロードが走ります。
+
+**初回起動には GitHub へのアクセスが必要**です。クライアントは
+`https://github.com/slackhq/nebula/releases/download/v1.11.0/nebula-windows-amd64.zip`
+をダウンロードし、SHA-256
+（`dc6b144bd852b5a17fc0c9283d96e6309fd918c9e8f385fab256da6dfdd42232`）を検証します。
+プロキシ環境や隔離ネットワークでは
+「Nebula のダウンロードが複数回中断しました。プロキシまたはネットワークを確認してください」
+と表示されます。
+
+#### オフライン配布（ネットにつながらない複数クライアント）
+
+インターネット接続のあるマシンで公式 zip を取得・検証し、上記の構造に展開すれば、
+クライアントはダウンロードを省略します：
+
+```powershell
+# 1) 検証（上記 SHA-256 と一致しないとクライアントは使用を拒否します）
+Get-FileHash .\nebula-windows-amd64.zip -Algorithm SHA256
+
+# 2) 固定の場所に展開（Expand-Archive が dist\ も展開します。それが必要な形です）
+$dst = "$env:APPDATA\MeshLANNebula\runtime\nebula-v1.11.0"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Expand-Archive .\nebula-windows-amd64.zip -DestinationPath $dst -Force
+
+# 3) 必須の 3 ファイルが揃っているか確認
+Test-Path "$dst\nebula.exe"
+Test-Path "$dst\nebula-cert.exe"
+Test-Path "$dst\dist\windows\wintun\bin\amd64\wintun.dll"
+```
+
+`dist\windows\wintun\` 配下の他アーキテクチャ（`arm`、`arm64`、`x86`）と `include\`、
+`README.md`、`LICENSE.txt` は削除できますが、**`bin\amd64\wintun.dll` は残してください**
+（nebula.exe が実行時に自身のディレクトリから読み込みます）。`native-webview2\EBWebView\`
+は Edge エンジンのキャッシュでありプログラム本体ではないため、いつでも削除できます
+（次回起動時に再生成されます）。
 
 ### Linux 子ノードを追加
 

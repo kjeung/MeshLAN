@@ -235,6 +235,22 @@ meshlan-nebula-node-linux-arm64
 SHA256SUMS.txt
 ```
 
+**You do not need a Windows machine to build the client.** `cmd/meshlan` is pure Go with
+`CGO_ENABLED=0` by default, so it cross-compiles from Linux/macOS:
+
+```bash
+VERSION="$(cat VERSION)"
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+  -ldflags "-s -w -H=windowsgui -X main.clientVersion=meshlan-nebula/$VERSION" \
+  -o dist/MeshLAN-Nebula-Windows.exe ./cmd/meshlan
+```
+
+The result is a PE32+ / amd64 / **GUI-subsystem** binary (not a console program), about 15 MB.
+
+> **This repo publishes no GitHub releases** (only a tag), and `dist/` is not committed. A ready-made
+> exe therefore comes from `build.ps1` or from a CI artifact in Actions (downloadable per commit,
+> subject to expiry).
+
 ### Initialize the main server
 
 Replace the example addresses, ports, and paths:
@@ -272,6 +288,62 @@ systemd user, `LoadCredential`, minimal firewall rules, and offline backups.
 On first run, enter the device name, the main server address, and an `MLN1...` one-time enrollment
 hash. The client generates its Nebula private key locally and installs the `Nebula` Windows service.
 Closing the desktop window does not disconnect the virtual network.
+
+#### Runtime directory (where `nebula.exe` goes)
+
+**Do not** put `nebula.exe` next to `MeshLAN-Nebula-Windows.exe`. The location is hard-coded and
+independent of where the exe lives (`cmd/meshlan/client_windows.go:1970`):
+
+```text
+%APPDATA%\MeshLANNebula\        <- appRoot() = os.UserConfigDir()/MeshLANNebula
+├── client\                     <- client state; deleting it resets the client (re-pair needed)
+│   ├── client-state.json
+│   ├── history.sqlite
+│   ├── host.key / host.pub / host.crt / ca.crt   <- created after pairing
+│   ├── config.yml              <- the rendered nebula config
+│   └── (file-shares.json, shares\, updates\, apply-update.ps1, ...)
+├── native-webview2\EBWebView\  <- WebView2 cache; safe to delete, rebuilt automatically
+└── runtime\
+    └── nebula-v1.11.0\         <- runtimeDir = root/runtime/nebula-v<version>
+        ├── nebula.exe          <- required
+        ├── nebula-cert.exe     <- required
+        └── dist\windows\wintun\
+            └── bin\amd64\wintun.dll   <- required (nebula.exe loads it at runtime)
+```
+
+`ensureNebulaRuntime` skips the download only when **both** files are present; dropping in
+`nebula.exe` alone still triggers a re-download.
+
+**First run needs GitHub**: the client downloads
+`https://github.com/slackhq/nebula/releases/download/v1.11.0/nebula-windows-amd64.zip`
+and verifies its SHA-256 (`dc6b144bd852b5a17fc0c9283d96e6309fd918c9e8f385fab256da6dfdd42232`).
+Behind a proxy or on an isolated network the download fails with
+"Nebula download interrupted repeatedly; check proxy or network".
+
+#### Offline deployment (many clients, no internet)
+
+Fetch the official zip once on a machine with internet, verify it, and lay it out as above —
+the client then skips the download:
+
+```powershell
+# 1) Verify (must match the SHA-256 above, or the client refuses the package)
+Get-FileHash .\nebula-windows-amd64.zip -Algorithm SHA256
+
+# 2) Lay it out at the fixed location (Expand-Archive also unpacks dist\, which is what we need)
+$dst = "$env:APPDATA\MeshLANNebula\runtime\nebula-v1.11.0"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Expand-Archive .\nebula-windows-amd64.zip -DestinationPath $dst -Force
+
+# 3) Confirm the three required files exist
+Test-Path "$dst\nebula.exe"
+Test-Path "$dst\nebula-cert.exe"
+Test-Path "$dst\dist\windows\wintun\bin\amd64\wintun.dll"
+```
+
+The other architectures under `dist\windows\wintun\` (`arm`, `arm64`, `x86`) plus `include\`,
+`README.md` and `LICENSE.txt` can be deleted; **`bin\amd64\wintun.dll` must stay** — nebula.exe
+loads it from its own directory at runtime. `native-webview2\EBWebView\` is Edge's engine
+cache, not program data, and is safe to delete (it is recreated on next start).
 
 ### Add a Linux child node
 

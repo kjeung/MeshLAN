@@ -247,6 +247,20 @@ go test ./...
 go vet ./...
 ```
 
+**没有 Windows 机器也能编译客户端**：`cmd/meshlan` 是纯 Go、默认 `CGO_ENABLED=0`，可直接在 Linux/macOS 交叉编译：
+
+```bash
+VERSION="$(cat VERSION)"
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+  -ldflags "-s -w -H=windowsgui -X main.clientVersion=meshlan-nebula/$VERSION" \
+  -o dist/MeshLAN-Nebula-Windows.exe ./cmd/meshlan
+```
+
+产物是 PE32+ / amd64 / **GUI 子系统**（不是控制台程序），约 15 MB。
+
+> **仓库没有发布任何 release**（只有 tag），`dist/` 也不入库。所以拿不到成品 exe 只能自己编：
+> `build.ps1` 或 CI 的 artifact（Actions 里按 commit 下载，有过期时间）。
+
 ### 初始化主服务端
 
 以下仅为示例；请替换公网地址、端口和文件路径：
@@ -302,6 +316,61 @@ sudo /usr/local/bin/meshlan-nebula server serve \
 
 客户端在本机生成 Nebula 私钥，领取证书后安装 `Nebula` Windows 服务。关闭桌面窗口
 不会断开虚拟网络。
+
+#### 运行时目录（`nebula.exe` 放在哪）
+
+**不要**把 `nebula.exe` 放到 `MeshLAN-Nebula-Windows.exe` 同级——位置是代码写死的，
+与 exe 所在目录无关（`cmd/meshlan/client_windows.go:1970`）：
+
+```text
+%APPDATA%\MeshLANNebula\        ← appRoot()，即 os.UserConfigDir()/MeshLANNebula
+├── client\                     ← 客户端状态，删了等于重置（需重新配对）
+│   ├── client-state.json
+│   ├── history.sqlite
+│   ├── host.key / host.pub / host.crt / ca.crt   ← 配对后生成
+│   ├── config.yml              ← 渲染出的 nebula 配置
+│   └── (file-shares.json, shares\, updates\, apply-update.ps1, …)
+├── native-webview2\EBWebView\  ← WebView2 缓存，可删，会自动重建
+└── runtime\
+    └── nebula-v1.11.0\         ← runtimeDir = root/runtime/nebula-v<版本>
+        ├── nebula.exe          ← 必需
+        ├── nebula-cert.exe     ← 必需
+        └── dist\windows\wintun\
+            └── bin\amd64\wintun.dll   ← 必需（nebula.exe 运行时加载）
+```
+
+`ensureNebulaRuntime` 的判据是**两个文件都齐**才跳过下载；只放 `nebula.exe` 仍会重新下载。
+
+**首次运行需要访问 GitHub**：客户端会下载
+`https://github.com/slackhq/nebula/releases/download/v1.11.0/nebula-windows-amd64.zip`
+并校验 SHA-256（`dc6b144bd852b5a17fc0c9283d96e6309fd918c9e8f385fab256da6dfdd42232`）。
+内网/代理环境若下不来，会报「Nebula 下载多次中断，请检查代理或网络」。
+
+#### 离线部署（不联网的多台客户端）
+
+在一台能上网的机器上下好官方 zip，校验后按上面的结构铺进去即可——文件已在，
+客户端就跳过下载：
+
+```powershell
+# 1) 校验（必须与上面那个 SHA-256 一致，否则客户端拒绝使用）
+Get-FileHash .\nebula-windows-amd64.zip -Algorithm SHA256
+
+# 2) 铺到固定位置（Expand-Archive 会把 dist\ 一起解开，正合所需）
+$dst = "$env:APPDATA\MeshLANNebula\runtime\nebula-v1.11.0"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Expand-Archive .\nebula-windows-amd64.zip -DestinationPath $dst -Force
+
+# 3) 确认三件必需文件都在
+Test-Path "$dst\nebula.exe"
+Test-Path "$dst\nebula-cert.exe"
+Test-Path "$dst\dist\windows\wintun\bin\amd64\wintun.dll"
+```
+
+`dist\windows\wintun\` 里其余架构（`arm/arm64/x86`）的 dll 与 `include\`、`README.md`、
+`LICENSE.txt` 可以删除；**`bin\amd64\wintun.dll` 不能删**——它由 nebula.exe 在运行时
+从自己所在目录加载。`native-webview2\EBWebView\` 是 Edge 内核缓存，不是程序文件，
+随时可删（下次启动会重新生成）。
+
 
 ### 添加 Linux 子节点
 
