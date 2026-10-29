@@ -85,6 +85,11 @@ done
 for bin in docker; do
   command -v "$bin" >/dev/null 2>&1 || die "缺 $bin：请先安装 Docker（或 Podman 的 docker 兼容层）"
 done
+# 起 Node 后要用 curl + jq 自动配对；缺它们时不报错，只把自动配对降级成打印手工步骤。
+HAVE_CURL_JQ=0
+if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HAVE_CURL_JQ=1
+fi
 docker compose version >/dev/null 2>&1 || die "docker compose v2 不可用（本脚本不做 v1 降级）"
 [ -e /dev/net/tun ] || die "没有 /dev/net/tun：Nebula 建不出 tun 设备（宿主机需要 tun 模块，容器要透传该设备）"
 
@@ -184,6 +189,10 @@ EOF
 chmod 0600 "$ENV_FILE"
 note "已写 $ENV_FILE（0600，已进 .gitignore）"
 
+# 起 Node 时配对要用到的端口：与写进 .env 的保持一致。
+NODE_PAIRING_PORT=18090
+NODE_NEBULA_PORT=14242
+
 # ---------------------------------------------------------------- 校验 compose
 
 cd "$REPO_ROOT"
@@ -220,12 +229,113 @@ fi
 if [ "$run_up" = "1" ]; then
   note "开始构建并启动……"
   docker compose "${compose_args[@]}" up -d --build
+
+  # ---------------------------------------------------------------- 等 Lighthouse 就绪
   note ""
-  note "起来了。接下来："
-  note "  1) 取一次性凭据：docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt"
-  note "     （配对哈希与管理令牌只在初始化时生成一次；这个文件建议读完就删）"
-  note "  2) 管理台：https://$PUBLIC_IP:$PAIRING_PORT/admin"
-  note "  3) 备份：docker compose stop 后打包 $STATE_DIR（必须含 history.sqlite-wal）"
+  note "等待 Lighthouse 健康（冷启动要签发 PKI、拉起 Nebula，最多 3 分钟）……"
+  lh_deadline=$((SECONDS + 180))
+  lh_ready=0
+  while [ "$SECONDS" -lt "$lh_deadline" ]; do
+    cid="$(docker compose ps -q lighthouse 2>/dev/null || true)"
+    status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo unknown)"
+    if [ "$status" = "healthy" ]; then lh_ready=1; break; fi
+    sleep 3
+  done
+  if [ "$lh_ready" != "1" ]; then
+    note "Lighthouse 还没转 healthy。先看日志：docker compose logs lighthouse"
+    note "（健康只说明控制面在监听；若只是慢，稍等再看管理台）"
+  else
+    note "Lighthouse 已 healthy。"
+  fi
+
+  admin_token="$(docker compose exec -T lighthouse sh -c \
+    'sed -n "s/^管理令牌: //p" /var/lib/meshlan/first-credentials.txt' 2>/dev/null | tr -d '\r' || true)"
+
+  if [ "$WITH_NODE" = "1" ]; then
+    # -------------------------------------------------------------- Node 自动配对
+    note ""
+    note "把 Node 加入主控（自动）……"
+    if [ "$lh_ready" != "1" ]; then
+      note "Lighthouse 未就绪，跳过自动配对。手工步骤见下方。"
+    elif [ -z "$admin_token" ]; then
+      note "没能从 first-credentials.txt 取到管理令牌，跳过自动配对。手工步骤见下方。"
+    elif [ "$HAVE_CURL_JQ" != "1" ]; then
+      note "缺 curl 或 jq，跳过自动配对。手工步骤见下方。"
+    else
+      node_hash="$(docker compose exec -T node sh -c \
+        'sed -n "s/^子节点哈希: //p" /var/lib/meshlan/node/first-credentials.txt' 2>/dev/null | tr -d '\r' || true)"
+      if [ -z "$node_hash" ]; then
+        note "没能取到 Node 的子节点哈希（Node 可能还没初始化完），跳过自动配对。"
+      else
+        session="$(curl -kfsS --max-time 10 -X POST \
+          -H "X-MeshLAN-Admin-Token: $admin_token" \
+          -H 'Content-Type: application/json' -d '{}' \
+          "https://127.0.0.1:$PAIRING_PORT/v1/admin/session" 2>/dev/null \
+          | jq -r '.sessionToken // empty' 2>/dev/null || true)"
+        if [ -z "$session" ]; then
+          note "管理令牌换不到会话（管理台可能已开 TOTP），跳过自动配对。"
+        else
+          # endpoint 用 host.docker.internal：产品定义已给两个服务加了 extra_hosts。
+          code="$(curl -ksS --max-time 40 -o /tmp/meshlan-addnode.$$ -w '%{http_code}' -X POST \
+            -H "X-MeshLAN-Admin-Session: $session" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg e 'host.docker.internal' --arg h "$node_hash" --arg n 'edge-01' '{endpoint:$e,hash:$h,name:$n}')" \
+            "https://127.0.0.1:$PAIRING_PORT/v1/admin/nodes" 2>/dev/null || echo 000)"
+          body="$(cat /tmp/meshlan-addnode.$$ 2>/dev/null || true)"
+          rm -f /tmp/meshlan-addnode.$$
+          if [ "$code" = "201" ]; then
+            note "已加入主控（POST /v1/admin/nodes -> 201），名字 edge-01。"
+            note "等 Node 完成 enroll 并拉起 Nebula（最多 60 秒）……"
+            enrolled=0
+            pair_deadline=$((SECONDS + 60))
+            while [ "$SECONDS" -lt "$pair_deadline" ]; do
+              h="$(curl -kfsS --max-time 10 "https://127.0.0.1:$NODE_PAIRING_PORT/v1/node/health" 2>/dev/null || true)"
+              if [ "$(printf '%s' "$h" | jq -r '.enrolled // false' 2>/dev/null)" = "true" ] \
+                 && [ "$(printf '%s' "$h" | jq -r '.nebulaRunning // false' 2>/dev/null)" = "true" ]; then
+                enrolled=1; break
+              fi
+              sleep 3
+            done
+            if [ "$enrolled" = "1" ]; then
+              note "Node 配对完成：enrolled=true、nebulaRunning=true。"
+            else
+              note "Node 还没转到 enrolled+nebulaRunning。查：docker compose logs node"
+            fi
+          else
+            note "加节点失败（HTTP $code）。响应体："
+            printf '%s\n' "${body:0:600}" | sed 's/^/    /'
+            note "409 是笼统码：常见原因是主控到 Node 的 $NODE_PAIRING_PORT 不通，"
+            note "或该 Node 已被加过（换名字或删 Node 状态目录后重来）。"
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  # ---------------------------------------------------------------- 手工步骤（始终打印）
+  note ""
+  note "手工加入 Node（自动配对没成功、或想改名字/地址时用）："
+  note "  1) 取 Node 哈希："
+  note "     docker compose exec node cat /var/lib/meshlan/node/first-credentials.txt"
+  note "  2) 取管理令牌："
+  note "     docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt"
+  note "  3) 打开管理台 https://$PUBLIC_IP:$PAIRING_PORT/admin ，用管理令牌登录，"
+  note "     进「多节点」页，填 节点名称 / 子节点 IP 或域名 / 子节点哈希（MLNODE1…），点「验证并添加」。"
+  note "     子节点 IP 或域名 填 host.docker.internal（同主机）或 Node 的真实公网地址。"
+  note ""
+  note "  还可以纯 API（脚本用的就是这条）："
+  note "     SESSION=\$(curl -kfsS -X POST -H \"X-MeshLAN-Admin-Token: <管理令牌>\" \\"
+  note "       -H 'Content-Type: application/json' -d '{}' \\"
+  note "       https://127.0.0.1:$PAIRING_PORT/v1/admin/session | jq -r .sessionToken)"
+  note "     curl -kfsS -X POST -H \"X-MeshLAN-Admin-Session: \$SESSION\" \\"
+  note "       -H 'Content-Type: application/json' \\"
+  note "       -d '{\"endpoint\":\"host.docker.internal\",\"hash\":\"MLNODE1…\",\"name\":\"edge-01\"}' \\"
+  note "       https://127.0.0.1:$PAIRING_PORT/v1/admin/nodes"
+  note ""
+  note "备份：docker compose stop 后打包 $STATE_DIR（整目录，天然含 history.sqlite-wal）"
 else
   note "未启动。随时可以用：docker compose ${compose_args[*]} up -d --build"
+  if [ "$WITH_NODE" = "1" ]; then
+    note "起来之后，Node 的加入方式见部署手册 5.1：管理台「多节点」页，或同一节里的纯 API 命令。"
+  fi
 fi

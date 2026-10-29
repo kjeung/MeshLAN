@@ -173,6 +173,11 @@ MESHLAN_IP=203.0.113.10 MESHLAN_NODE_IP=198.51.100.20 \
 docker compose exec node cat /var/lib/meshlan/node/first-credentials.txt   # 子节点哈希: MLNODE1…
 ```
 
+> **用 `docker/bootstrap.sh --with-node`（或交互时回答 yes）就**不用手动做下面这些**：它会自己
+> 取管理令牌、换会话、读 Node 哈希、`POST /v1/admin/nodes`，再轮询 Node 的
+> `/v1/node/health` 确认 `enrolled` 与 `nebulaRunning` 都为 true，失败会把响应体贴出来。
+> 下面 5.1 是手工/自动化两种等价做法。
+
 ### 5.1 在主控上加节点（可纯 API，适合自动化）
 
 同主机部署时，主控需要能连到 Node 发布的 `18090/tcp`。**compose 服务名只在同一

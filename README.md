@@ -418,7 +418,10 @@ MESHLAN_IP=203.0.113.10 MESHLAN_NODE_IP=198.51.100.20 \
   docker compose --profile node up -d --build
 ```
 
-Node 的 profile 名固定为 `node`。它和 Lighthouse 共用同一个状态目录，但身份存放在子目录里；把
+Node 的 profile 名固定为 `node`。它和 Lighthouse 共用同一个状态目录，但身份存放在子目录里。
+用 `docker/bootstrap.sh --with-node` 起的话，脚本会**自己把 Node 加进主控并验证配对**；手工做法是
+取 `first-credentials.txt` 里的 `MLNODE1…` 哈希，在管理台「多节点」页填入，或用部署手册 5.1 的纯
+API 命令。把
 `first-credentials.txt` 里的 `MLNODE1…` 哈希填到 Lighthouse 管理台的多节点页面即可。
 
 同主机部署时，主控要连到 Node 发布的 `18090/tcp`：compose 服务名只在同一 compose 网络内可解析，
