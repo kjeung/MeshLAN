@@ -173,6 +173,17 @@ func (a *clientApp) buildDiagnosticReport() ([]byte, string, error) {
 		{"windows/nebula-service.txt", []byte(redactor.Text(diagnosticCommand("sc.exe", "query", "Nebula")))},
 		{"windows/nebula-events.txt", []byte(redactor.Text(diagnosticCommand("powershell.exe", "-NoProfile", "-Command", `$events=@(Get-WinEvent -FilterHashtable @{LogName='Application';ProviderName='Nebula';StartTime=(Get-Date).AddDays(-1)} -MaxEvents 120 -ErrorAction SilentlyContinue | Select-Object TimeCreated,LevelDisplayName,Message); $events | Format-List | Out-String -Width 4096`)))},
 	}
+	// The client's own stdout/stderr now lives in a rotating log file; attach
+	// its tail so a support bundle still explains what the client did.
+	if logTail, logPath, logErr := openClientLogForSupport(redactor); logErr == nil {
+		entries = append(entries, struct {
+			name string
+			data []byte
+		}{"client/meshlan-client.log", logTail})
+		reportMeta["clientLogPath"] = logPath
+	} else {
+		reportMeta["clientLogError"] = logErr.Error()
+	}
 	if topologyErr == nil {
 		entries = append(entries, struct {
 			name string

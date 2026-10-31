@@ -289,6 +289,14 @@ On first run, enter the device name, the main server address, and an `MLN1...` o
 hash. The client generates its Nebula private key locally and installs the `Nebula` Windows service.
 Closing the desktop window does not disconnect the virtual network.
 
+The client is a `windowsgui` binary, so no console window appears at startup. Its own output
+(startup notices, errors, and anything the standard `log` package writes) all goes to
+`client\logs\meshlan-client.log` in the runtime directory above. The file rotates at 2 MB and
+keeps the active file plus two generations (`.1`, `.2`). Launching it from `cmd.exe` keeps that
+shell's console: MeshLAN does not close a window it does not own. Settings can open the log file
+directly, and `client\log-rotation.json` (`directory` / `filename` / `maxBytes` / `maxBackups`)
+overrides where it lives and how large it may grow.
+
 #### Runtime directory (where `nebula.exe` goes)
 
 **Do not** put `nebula.exe` next to `MeshLAN-Nebula-Windows.exe`. The location is hard-coded and
@@ -301,6 +309,9 @@ independent of where the exe lives (`cmd/meshlan/client_windows.go:1970`):
 │   ├── history.sqlite
 │   ├── host.key / host.pub / host.crt / ca.crt   <- created after pairing
 │   ├── config.yml              <- the rendered nebula config
+│   ├── logs\                   <- client log; output goes to the file, never to a console window
+│   │   ├── meshlan-client.log      <- active log, rotated at 2 MB
+│   │   └── meshlan-client.log.1 / .2 <- the two retained generations
 │   └── (file-shares.json, shares\, updates\, apply-update.ps1, ...)
 ├── native-webview2\EBWebView\  <- WebView2 cache; safe to delete, rebuilt automatically
 └── runtime\

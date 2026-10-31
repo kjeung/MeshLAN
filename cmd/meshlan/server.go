@@ -302,6 +302,7 @@ func serverFlagSet(name string) (*flag.FlagSet, *string) {
 
 func runCommand(executable string, args ...string) error {
 	cmd := exec.Command(executable, args...)
+	hideCommandWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s: %s: %w", executable, strings.Join(args, " "), strings.TrimSpace(string(output)), err)

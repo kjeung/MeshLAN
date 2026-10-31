@@ -307,6 +307,9 @@ sudo /usr/local/bin/meshlan-nebula server init \
 │   ├── history.sqlite
 │   ├── host.key / host.pub / host.crt / ca.crt   <- ペアリング後に生成
 │   ├── config.yml              <- レンダリングされた nebula 設定
+│   ├── logs\                   ← クライアントのログ（コンソールウィンドウは開かない）
+│   │   ├── meshlan-client.log      ← 現在のログ。2 MB を超えると自動ローテーション
+│   │   └── meshlan-client.log.1 / .2 ← 保持される 2 世代分の履歴
 │   └── (file-shares.json, shares\, updates\, apply-update.ps1, ...)
 ├── native-webview2\EBWebView\  <- WebView2 キャッシュ。削除可、自動再生成
 └── runtime\

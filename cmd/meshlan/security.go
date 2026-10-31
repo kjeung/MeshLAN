@@ -250,7 +250,9 @@ func certificateFingerprint(certExecutable, certificatePath string) (string, err
 	if strings.TrimSpace(certExecutable) == "" || strings.TrimSpace(certificatePath) == "" {
 		return "", errors.New("证书工具或证书路径为空")
 	}
-	output, err := exec.Command(certExecutable, "print", "-path", certificatePath).CombinedOutput()
+	command := exec.Command(certExecutable, "print", "-path", certificatePath)
+	hideCommandWindow(command)
+	output, err := command.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("读取证书指纹失败: %s", strings.TrimSpace(string(output)))
 	}

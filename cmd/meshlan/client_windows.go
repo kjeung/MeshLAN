@@ -23,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf16"
 )
@@ -66,9 +65,7 @@ type clientApp struct {
 	aiPlans             map[string]AIPlan
 }
 
-func hidden(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-}
+func hidden(cmd *exec.Cmd) { hideCommandWindow(cmd) }
 
 func (a *clientApp) ensureRuntime() error {
 	nebula, cert, err := ensureNebulaRuntime(a.runtimeDir)
@@ -955,7 +952,20 @@ func (a *clientApp) routes() http.Handler {
 		jsonReply(w, 200, map[string]any{
 			"state": publicClientState(state), "status": status, "network": networkStatus(state),
 			"clientVersion": clientVersion, "nebulaVersion": nebulaVersion,
+			"log": clientLogRotationStatus(a.root),
 		})
+	})
+	// The client has no console to show diagnostics in any more, so the log
+	// file's location and limits are part of the state payload instead.
+	mux.HandleFunc("GET /api/logs", func(w http.ResponseWriter, _ *http.Request) {
+		jsonReply(w, 200, clientLogRotationStatus(a.root))
+	})
+	mux.HandleFunc("POST /api/logs/open", func(w http.ResponseWriter, _ *http.Request) {
+		if err := revealClientLog(); err != nil {
+			jsonReply(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		jsonReply(w, 200, map[string]string{"path": clientLogCurrentPath()})
 	})
 	mux.HandleFunc("GET /api/network", func(w http.ResponseWriter, _ *http.Request) {
 		state, _, err := a.ensureOptimizedClientConfig()
@@ -1938,6 +1948,9 @@ func localBackendAvailable(url string) bool {
 
 func startNativeDesktopProcess(executable string) error {
 	command := exec.Command(executable, "client", "--gui-only")
+	// HideWindow keeps the child from borrowing a console when the parent was
+	// started from a shell; the child is a GUI binary in its own right.
+	hidden(command)
 	return command.Start()
 }
 
@@ -1962,6 +1975,11 @@ func clientMain(args []string) error {
 	if err != nil {
 		return err
 	}
+	// No console exists to print to in a windowsgui binary: send the client's
+	// own output to a rotating file first, then drop the console a shell may
+	// have attached, so startup never shows a second window.
+	initClientLog(filepath.Join(root, "client"))
+	detachOwnConsole()
 	url := "http://127.0.0.1:8777"
 	guiProfile := filepath.Join(root, "native-webview2")
 	if guiOnly || (!noGUI && localBackendAvailable(url)) {
@@ -2038,6 +2056,9 @@ func clientMain(args []string) error {
 			time.Sleep(100 * time.Millisecond)
 		}
 		if err := startNativeDesktopProcess(executable); err != nil {
+			// There is no console to report on; fmt prints land in the rotating
+			// client log initialized at startup.
+			fmt.Println("MeshLAN 桌面窗口启动失败:", err)
 			_ = server.Close()
 			return err
 		}

@@ -317,6 +317,12 @@ sudo /usr/local/bin/meshlan-nebula server serve \
 客户端在本机生成 Nebula 私钥，领取证书后安装 `Nebula` Windows 服务。关闭桌面窗口
 不会断开虚拟网络。
 
+客户端是 `windowsgui` 子系统程序，启动时不会出现控制台窗口。它自身的输出（启动信息、错误和
+标准 `log` 记录）全部写入上面运行时目录里的 `client\logs\meshlan-client.log`，超过 2 MB 自动轮转，
+只保留当前文件加两代历史（`.1`、`.2`）。如果从 `cmd.exe` 手动启动，控制台属于你的 shell，
+MeshLAN 不会去关它；在「设置」里可以直接打开日志文件。日志目录和大小上限可以用
+`client\log-rotation.json`（`directory` / `filename` / `maxBytes` / `maxBackups`）覆盖。
+
 #### 运行时目录（`nebula.exe` 放在哪）
 
 **不要**把 `nebula.exe` 放到 `MeshLAN-Nebula-Windows.exe` 同级——位置是代码写死的，
@@ -329,6 +335,9 @@ sudo /usr/local/bin/meshlan-nebula server serve \
 │   ├── history.sqlite
 │   ├── host.key / host.pub / host.crt / ca.crt   ← 配对后生成
 │   ├── config.yml              ← 渲染出的 nebula 配置
+│   ├── logs\                   ← 客户端日志（只输出到文件，不弹控制台窗口）
+│   │   ├── meshlan-client.log      ← 当前日志，超过 2 MB 自动轮转
+│   │   └── meshlan-client.log.1 / .2 ← 保留的两代历史日志
 │   └── (file-shares.json, shares\, updates\, apply-update.ps1, …)
 ├── native-webview2\EBWebView\  ← WebView2 缓存，可删，会自动重建
 └── runtime\
