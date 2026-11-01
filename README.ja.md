@@ -284,6 +284,97 @@ sudo /usr/local/bin/meshlan-nebula server init \
 ホストで `server serve` を root（または `CAP_NET_ADMIN` 付き）で実行してください。tun デバイス名は
 `meshlan-lh`（15 バイト、カーネルの `IFNAMSIZ-1` 上限）に固定されています。
 
+### 管理画面：アドレス・パス・ログイン
+
+管理画面と API は**同じ TLS ポートを共有**します（`server serve` が状態の `pairingPort` に対して
+`tls.Listen` を 1 回だけ実行）。待ち受けアドレスは `-bind`（既定 `0.0.0.0`）で決まります：
+
+| 項目 | 値 |
+| --- | --- |
+| 管理画面 URL | `https://<公開アドレス>:<pairingPort>/admin`。`server init` が「管理ページ」として表示します |
+| ポート | 素のバイナリの `-pairing-port` 既定は **8080**。**コンテナのエントリポイントは必ず 8090** を渡すので混同しないこと |
+| ページの実体 | `cmd/meshlan/admin/index.html`。外部リソースを持たない単一ファイル |
+| 管理 API | 同一ポートの `/v1/admin/*`。`GET /v1/admin/auth-info` は認証不要で、`totpRequired` とセッション寿命だけを返します |
+
+証明書は自己署名です。ブラウザで信頼させるか、警告を一度だけ許可してください。
+**TLS を終端するリバースプロキシの背後に管理画面を置かないでください**（「リバースプロキシと SSO」参照）。
+
+ログインは「管理トークン」を **30 分**の短いセッションに交換する方式です（`sessionStorage` に保持し、
+タブを閉じると失効）。長期トークンはブラウザに残りません。シェルからの等価な手順：
+
+```bash
+# セッション取得（TOTP 有効時は -d '{"totp":"123456"}' を付ける）
+curl -kfsS -X POST -H "X-MeshLAN-Admin-Token: <管理トークン>" \
+  -H 'Content-Type: application/json' -d '{}' \
+  https://<公開アドレス>:<pairingPort>/v1/admin/session | jq -r .sessionToken
+
+# 以降の管理 API 呼び出しには短セッションを付ける
+curl -kfsS -H "X-MeshLAN-Admin-Session: <sessionToken>" \
+  https://<公開アドレス>:<pairingPort>/v1/admin/overview
+```
+
+トークンヘッダは `Authorization: Bearer <管理トークン>` でも構いません。同一送信元 IP の
+セッション試行は 1 分あたり 10 回までで、超えると `429` が返ります。
+
+### 管理トークンの入手方法
+
+トークンは 32 バイトの乱数（base64url）です。状態ファイルには**その SHA-256 ハッシュ
+（`adminTokenHash`）だけ**が保存されるため、**状態から逆算できません**。平文が存在するのは
+発行した瞬間だけです：
+
+1. **初期化時**：`server init` が「管理令牌: …」を一度だけ表示します。
+2. **コンテナ運用**：エントリポイントが同じ内容を状態ルートの `first-credentials.txt`（`0600`）へ
+   書き出します。コンテナは自動削除しないので、保存後に手で消してください
+   （「コンテナでの運用 → 一度きりの資格情報」参照）：
+
+   ```bash
+   docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
+   ```
+
+3. **失念・ローテーション**：再発行します。**古いトークンは失効し、ペアリング済み端末には
+   影響しません**。ただし**直後にサービスを再起動してください**：
+
+   ```bash
+   # コンテナ
+   docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
+   docker compose restart lighthouse
+   # ベアメタル（サブコマンドにも serve と同じ -state を必ず渡す）
+   sudo /usr/local/bin/meshlan-nebula server admin-token -state /etc/meshlan-nebula/server-state.json
+   sudo systemctl restart <meshlan のユニット>
+   ```
+
+> **再起動が必要な理由**：`server serve` は起動時に状態を一度だけメモリへ読み込み、その後は
+> **ハートビートのたびにメモリ上のコピーを丸ごと書き戻します**（ノード健全性の巡回も 15 秒ごとに
+> 書き込みます）。したがって稼働中のサービスに対して `admin-token` や `enable-totp` のような
+> オフラインサブコマンドを実行すると、新しい値は 1 回のハートビート以内に古いメモリコピーで
+> 上書きされます。新しいトークンは即座に無効化され、古いトークンは有効なまま残ります。
+> 発行前にサービスを停止するか、発行直後に再起動すれば上書きを避けられます。
+> ベアメタル構成には `first-credentials.txt` は**存在しません**（コンテナのエントリポイントが作る
+> 成果物です）。控えていなければ 3 の再発行しかありません。`-state` の既定値は
+> `<os.UserConfigDir()>/MeshLANNebula/server/server-state.json`（Linux では `~/.config/...`）ですが、
+> 上例は `/etc/meshlan-nebula/` を指しているので、全サブコマンドに同じパスを渡してください。
+
+初期化フェーズの stdout と `admin-token` の出力はどちらも機密を含み得ます。
+**永続ログへ流さないでください。**
+
+### 任意：管理画面の TOTP 二段階認証
+
+既定では無効です。有効にするとログインにトークンと 6 桁の動的コードの両方が必要になります
+（`auth-info` の `totpRequired` が true になります）：
+
+- 管理画面の「概览 → 加密与信任状态」で「设置TOTP动态验证码」を押し、シークレット/URI を
+  認証アプリへ登録して、生成されたコードで確定します；
+- またはコマンドライン（シークレットが表示されるのでログに残さないこと）：
+
+  ```bash
+  docker compose exec lighthouse meshlan server enable-totp -state /var/lib/meshlan/server-state.json
+  docker compose restart lighthouse    # admin-token と同じ上書き注意
+  ```
+
+無効化は `server disable-totp`（シークレットを消去。こちらも再起動が必要）、または画面で現在の
+コードを入力して行います。**TOTP シークレットを失って画面に入れなくなった場合、コマンドライン
+からの無効化が唯一の復旧手段です。**
+
 ### Windows クライアントを実行
 
 ```powershell
@@ -427,6 +518,11 @@ docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
 docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
 docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/server-state.json
 ```
+
+管理画面は **`https://<公開アドレス>:8090/admin`**（ポートは `MESHLAN_PAIRING_PORT`）です。
+`first-credentials.txt` の「管理令牌」でログインします。状態ファイルにはトークンの SHA-256
+ハッシュしかないため、平文は読み戻せません。30 分セッションへの交換と TOTP の詳細は
+「クイックスタート → 管理画面：アドレス・パス・ログイン」を参照してください。
 
 **ポート・権限・ヘルスチェック**
 

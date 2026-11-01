@@ -302,6 +302,88 @@ sudo /usr/local/bin/meshlan-nebula server serve \
 `LoadCredential` 和离线备份。示例 credential drop-in 位于
 `cmd/meshlan/deploy/systemd/20-credentials.conf`。
 
+### 管理台：地址、路径与登录
+
+管理台和 API **共用同一个 TLS 端口**（`server serve` 只对状态里的 `pairingPort` 做一次
+`tls.Listen`），监听地址由 `-bind` 决定，缺省 `0.0.0.0`：
+
+| 项目 | 值 |
+| --- | --- |
+| 管理台 URL | `https://<公网地址>:<pairingPort>/admin`；`server init` 会把这一行打印成「管理页面」 |
+| 端口 | 裸二进制的 `-pairing-port` flag 缺省 **8080**；**容器入口固定补成 8090**，两者别混用 |
+| 页面源码 | `cmd/meshlan/admin/index.html`，单文件自包含、无外部资源 |
+| 管理 API | 同端口下的 `/v1/admin/*`；`GET /v1/admin/auth-info` 免认证，只返回 `totpRequired` 与会话时长 |
+
+证书是自签的：浏览器要先信任它，或对警告放行一次。**不要把管理台挂到会终止 TLS 的反向代理后面**，
+理由见「反向代理与 SSO」一节。
+
+登录用「管理令牌」，由页面换成一个 **30 分钟**的短会话（存在 `sessionStorage`，关标签页即失效），
+长期令牌不落浏览器。命令行等价做法：
+
+```bash
+# 换会话（启用了 TOTP 时加上 -d '{"totp":"123456"}'）
+curl -kfsS -X POST -H "X-MeshLAN-Admin-Token: <管理令牌>" \
+  -H 'Content-Type: application/json' -d '{}' \
+  https://<公网地址>:<pairingPort>/v1/admin/session | jq -r .sessionToken
+
+# 之后的管理请求带短会话头
+curl -kfsS -H "X-MeshLAN-Admin-Session: <sessionToken>" \
+  https://<公网地址>:<pairingPort>/v1/admin/overview
+```
+
+令牌头也接受 `Authorization: Bearer <管理令牌>`。同一来源 IP 每分钟最多 10 次会话尝试，超出回 `429`。
+
+### 管理令牌怎么取
+
+令牌是 32 字节随机值（base64url）；状态文件里**只存它的 SHA-256 哈希**（`adminTokenHash`），
+所以**无法从状态反推**，只有签发那一刻能拿到明文：
+
+1. **初始化时**：`server init` 打印一次「管理令牌: …」。
+2. **容器部署**：入口在初始化时把同一份内容落盘到状态根下的 `first-credentials.txt`（`0600`），
+   容器不会自动删除，读完请手工删（详见「容器部署 → 一次性凭据」）：
+
+   ```bash
+   docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
+   ```
+
+3. **丢了或要轮换**：重新签发，**旧令牌失效、已配对设备不受影响**——但**必须紧接着重启服务**：
+
+   ```bash
+   # 容器
+   docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
+   docker compose restart lighthouse
+   # 裸机（每条子命令都要带上与 serve 相同的 -state）
+   sudo /usr/local/bin/meshlan-nebula server admin-token -state /etc/meshlan-nebula/server-state.json
+   sudo systemctl restart <你的 meshlan 单元>
+   ```
+
+> **为什么要重启**：`server serve` 启动时把状态读进内存一次，之后**每次心跳都会把内存副本整份写回**
+> 状态文件（节点健康巡检每 15 秒也会写一次）。所以在**运行中**的服务上执行 `admin-token`/`enable-totp`
+> 这类离线子命令，新值会在一次心跳之内被旧内存副本覆盖回去——新令牌随即失效、旧令牌照旧有效。
+> 先停服务再签发，或签发后立刻重启，二者都能避免这个覆盖。
+
+> 裸机部署**没有** `first-credentials.txt`（那只是容器入口的产物）：令牌没记下来，就只能用第 3 步
+> 重新签发。裸机状态下 `-state` 的缺省值是
+> `<os.UserConfigDir()>/MeshLANNebula/server/server-state.json`（Linux 上 `~/.config/...`），
+> 上面的示例显式指到 `/etc/meshlan-nebula/`，所以所有子命令都得带同一个路径。
+
+初始化阶段的 stdout 和 `admin-token` 的输出都可能带出机密，**不要接进持久日志系统**。
+
+### 可选：管理台 TOTP 二次认证
+
+默认关闭；开启后登录必须同时给出令牌和 6 位动态验证码（`auth-info` 的 `totpRequired` 会变 true）：
+
+- 管理台「概览 → 加密与信任状态」里点「设置TOTP动态验证码」，把密钥/URI 加进认证器，再输一次验证码确认；
+- 或走命令行（密钥会打印出来，注意别进日志）：
+
+  ```bash
+  docker compose exec lighthouse meshlan server enable-totp -state /var/lib/meshlan/server-state.json
+  docker compose restart lighthouse    # 与 admin-token 同理，签发后必须重启
+  ```
+
+关闭用 `server disable-totp`（清空密钥，同样要重启），或在面板里输入当前验证码关闭。
+**忘了 TOTP 密钥又进不去面板时，命令行关闭是唯一的脱困口。**
+
 ### 运行 Windows 客户端
 
 ```powershell
@@ -457,6 +539,10 @@ docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
 docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
 docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/server-state.json
 ```
+
+管理台地址是 **`https://<公网地址>:8090/admin`**（端口取 `MESHLAN_PAIRING_PORT`），用 `first-credentials.txt`
+里的「管理令牌」登录；状态文件里只有令牌的 SHA-256 哈希，读不回明文。登录后换 30 分钟短会话、
+口令/TOTP 细节见「快速开始 → 管理台：地址、路径与登录」。
 
 ### 端口、能力与健康检查
 

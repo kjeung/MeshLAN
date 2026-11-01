@@ -144,16 +144,58 @@ docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
 - `配对哈希: MLN1…` —— 给设备/节点配对用
 - `管理令牌: …` —— 登录管理台用
 
+#### 管理台地址与登录
+
+管理台和 API 共用同一个 TLS 端口（`server serve` 只对状态里的 `pairingPort` 监听一次）：
+
+| 项目 | 值 |
+| --- | --- |
+| 页面 | `https://<公网地址>:<配对端口>/admin`，即 `https://127.0.0.1:8090/admin`（本机自测） |
+| 端口 | 容器入口固定 `8090/tcp`（`MESHLAN_PAIRING_PORT` 可覆盖）；**裸二进制的 `-pairing-port` flag 缺省是 8080**，两套默认值别混用 |
+| 源码 | `cmd/meshlan/admin/index.html`，自包含单文件，无外部资源 |
+| 免认证接口 | `GET /v1/admin/auth-info`，只返回 `totpRequired` 与会话时长 |
+
+证书自签，浏览器需先信任或放行一次警告。登录流程：输入管理令牌 → 换取 **30 分钟**短会话
+（`sessionStorage`，关标签页失效）→ 后续请求带 `X-MeshLAN-Admin-Session`。
+
+**令牌不能从状态反推**：`server-state.json` 里只有 `adminTokenHash`（SHA-256），明文只在签发瞬间存在。
+所以只有三个来源：
+
+1. 初始化时 `server init` 打印的那一次；
+2. 上面的 `first-credentials.txt`；
+3. 主动重新签发（**旧令牌立即失效，已配对设备不受影响**，与本文件 5.1 节的纯 API 做法共用同一个令牌）：
+
+```bash
+docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
+```
+
+同一来源 IP 每分钟最多 10 次会话尝试，超出回 `429`。启用 TOTP 后登录还需 6 位动态验证码；
+忘了 TOTP 密钥又进不去面板时，用 `meshlan server disable-totp -state /var/lib/meshlan/server-state.json`
+从命令行关掉——这是唯一脱困口。
+
 > **初始化阶段的 stdout 不得接进持久日志系统**：`server init` 会先落明文 `ca.key`，
 > 随后才加密并删除，那一小段输出可能带出私钥。compose 已配日志轮转，但那只是降低
 > 暴露面，不替代这条口径。
 
-需要重新生成时（旧值立即失效，已配对设备不受影响）：
+需要重新生成时（旧值失效，已配对设备不受影响）：
 
 ```bash
 docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/server-state.json
 docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
 ```
+
+> **签发后必须重启 `lighthouse`**：`server serve` 只在启动时把状态读进内存一次，之后每次设备心跳
+> 和每 15 秒一次的节点健康巡检都会把**内存副本整份写回**状态文件（`server.go` 的心跳处理、
+> `multinode.go` 的 `refreshMeshNodeHealth`）。所以在**运行中**的服务上执行 `admin-token`
+> （以及 `enable-totp`/`disable-totp`、`pairing`）时，新值会在一次心跳之内被旧内存副本覆盖：新令牌
+> 立刻失效、旧令牌继续有效——表现为「签发成功但登录仍是旧令牌」。先停服务再签发，或签发后立刻
+> 重启，二者都能避开覆盖：
+
+```bash
+docker compose restart lighthouse
+```
+
+> 管理令牌换短会话、TOTP 与 429 限流的完整说明见 README「管理台：地址、路径与登录」。
 
 ---
 

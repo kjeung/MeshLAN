@@ -279,6 +279,98 @@ tun device name is fixed at `meshlan-lh` (15 bytes, the kernel `IFNAMSIZ-1` limi
 deployments should use a valid domain certificate, a dedicated
 systemd user, `LoadCredential`, minimal firewall rules, and offline backups.
 
+### Admin console: address, path, and sign-in
+
+The console and the API **share one TLS port** (`server serve` calls `tls.Listen` once, on the
+state's `pairingPort`); the listen address comes from `-bind` (default `0.0.0.0`):
+
+| Item | Value |
+| --- | --- |
+| Console URL | `https://<public-address>:<pairingPort>/admin`; `server init` prints it as “管理页面” |
+| Port | The bare binary's `-pairing-port` flag defaults to **8080**; the **container entrypoint always sets 8090** — do not mix the two |
+| Page source | `cmd/meshlan/admin/index.html`, one self-contained file with no external assets |
+| Admin API | `/v1/admin/*` on the same port; `GET /v1/admin/auth-info` needs no auth and returns only `totpRequired` and the session lifetime |
+
+The certificate is self-signed: trust it in your browser or clear the warning once. **Never put the
+console behind a proxy that terminates TLS** — see “Reverse proxy and SSO”.
+
+Sign-in takes the admin token and exchanges it for a **30-minute** session (kept in
+`sessionStorage`, gone when the tab closes); the long-lived token never lands in the browser. The
+equivalent from a shell:
+
+```bash
+# Exchange the token (add -d '{"totp":"123456"}' when TOTP is enabled)
+curl -kfsS -X POST -H "X-MeshLAN-Admin-Token: <admin token>" \
+  -H 'Content-Type: application/json' -d '{}' \
+  https://<public-address>:<pairingPort>/v1/admin/session | jq -r .sessionToken
+
+# Then send the short session on every admin call
+curl -kfsS -H "X-MeshLAN-Admin-Session: <sessionToken>" \
+  https://<public-address>:<pairingPort>/v1/admin/overview
+```
+
+The token header also accepts `Authorization: Bearer <admin token>`. One source IP gets at most 10
+session attempts per minute; beyond that the server answers `429`.
+
+### Where the admin token comes from
+
+The token is 32 random bytes (base64url). The state file keeps **only its SHA-256 digest**
+(`adminTokenHash`), so it **cannot be recovered from state** — the plaintext exists only at issue
+time:
+
+1. **At init**: `server init` prints “管理令牌: …” once.
+2. **Container deployment**: the entrypoint also writes it to `first-credentials.txt` in the state
+   root (`0600`); the container never deletes it, so remove it once saved (see “Container deployment
+   → one-time credentials”):
+
+   ```bash
+   docker compose exec lighthouse cat /var/lib/meshlan/first-credentials.txt
+   ```
+
+3. **Lost or rotating**: reissue it. **The old token stops working and paired devices are unaffected** —
+   but **restart the service right after**:
+
+   ```bash
+   # Container
+   docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
+   docker compose restart lighthouse
+   # Bare metal (every subcommand needs the same -state as serve)
+   sudo /usr/local/bin/meshlan-nebula server admin-token -state /etc/meshlan-nebula/server-state.json
+   sudo systemctl restart <your meshlan unit>
+   ```
+
+> **Why the restart**: `server serve` reads the state into memory once at startup, then **writes the
+> whole in-memory copy back on every heartbeat** (the node health sweep writes every 15 seconds too).
+> Running an offline subcommand like `admin-token` or `enable-totp` against a live server therefore
+> gets overwritten by the stale in-memory copy within one heartbeat — the new token immediately dies
+> and the old one keeps working. Stop the service before issuing, or restart immediately after; either
+> avoids the overwrite.
+> A bare-metal install has **no** `first-credentials.txt` (that file is an entrypoint artifact), so an
+> unrecorded token can only be replaced via step 3. The default `-state` path is
+> `<os.UserConfigDir()>/MeshLANNebula/server/server-state.json` (`~/.config/...` on Linux); the
+> example above points at `/etc/meshlan-nebula/`, so pass that path to every subcommand.
+
+The init phase's stdout and the `admin-token` output can both leak secrets — **never pipe them into a
+persistent log sink**.
+
+### Optional: TOTP two-factor for the console
+
+Off by default. Once enabled, sign-in needs the token *and* a 6-digit code (`totpRequired` in
+`auth-info` turns true):
+
+- In the console, under “概览 → 加密与信任状态”, click “设置TOTP动态验证码”, add the secret/URI to an
+  authenticator, then confirm with a generated code;
+- Or from the shell (the secret is printed — keep it out of logs):
+
+  ```bash
+  docker compose exec lighthouse meshlan server enable-totp -state /var/lib/meshlan/server-state.json
+  docker compose restart lighthouse    # same overwrite caveat as admin-token
+  ```
+
+Turn it off with `server disable-totp` (clears the secret; restart as well), or by entering a current
+code in the console. **If the TOTP secret is lost and the console is unreachable, disabling it from
+the shell is the only way back in.**
+
 ### Run the Windows client
 
 ```powershell
@@ -428,6 +520,11 @@ To regenerate (the old value dies immediately; already-paired devices are unaffe
 docker compose exec lighthouse meshlan server admin-token -state /var/lib/meshlan/server-state.json
 docker compose exec lighthouse meshlan server pairing -state /var/lib/meshlan/server-state.json
 ```
+
+The console lives at **`https://<public-address>:8090/admin`** (port from `MESHLAN_PAIRING_PORT`); sign
+in with the “管理令牌” from `first-credentials.txt`. The state file holds only the token's SHA-256
+digest, so the plaintext cannot be read back. Exchanging it for the 30-minute session and the TOTP
+detail are in “Quick start → Admin console: address, path, and sign-in”.
 
 **Ports, capabilities, health**
 
